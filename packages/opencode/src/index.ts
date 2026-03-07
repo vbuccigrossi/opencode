@@ -46,10 +46,16 @@ process.on("uncaughtException", (e) => {
   })
 })
 
-// Ensure the process exits on terminal hangup (eg. closing the terminal tab).
-// Without this, long-running commands like `serve` block on a never-resolving
-// promise and survive as orphaned processes.
-process.on("SIGHUP", () => process.exit())
+// Safety net: on signal, schedule a forced process.exit(0) after 3s,
+// then remove this listener and re-raise so command-specific handlers
+// (and finally the OS default) can still run gracefully.
+// process.exit() is intentional here — it's a last resort if graceful shutdown hangs.
+for (const signal of ["SIGHUP", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    setTimeout(() => process.exit(0), 3000).unref()
+    process.kill(process.pid, signal)
+  })
+}
 
 let cli = yargs(hideBin(process.argv))
   .parserConfiguration({ "populate--": true })

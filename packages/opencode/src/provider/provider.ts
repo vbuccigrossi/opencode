@@ -124,7 +124,7 @@ export namespace Provider {
         options: {
           headers: {
             "anthropic-beta":
-              "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,context-1m-2025-08-07",
           },
         },
       }
@@ -1017,6 +1017,29 @@ export namespace Provider {
 
       for (const [modelID, model] of Object.entries(provider.models)) {
         model.api.id = model.api.id ?? model.id ?? modelID
+
+        // Override context window for Anthropic models that support 1M via the
+        // context-1m-2025-08-07 beta header. models.dev currently reports 200K;
+        // this ensures compaction uses the real limit for API key users.
+        // See: https://docs.anthropic.com/en/docs/about-claude/models
+        if (
+          providerID === "anthropic" &&
+          model.limit.context < 1_000_000 &&
+          [
+            "opus-4-6",
+            "opus-4.6",
+            "sonnet-4-6",
+            "sonnet-4.6",
+            "sonnet-4-5",
+            "sonnet-4.5",
+            "sonnet-4-0",
+            "sonnet-4.0",
+            "sonnet-4-20250514",
+          ].some((p) => model.api.id.includes(p))
+        ) {
+          model.limit.context = 1_000_000
+        }
+
         if (modelID === "gpt-5-chat-latest" || (providerID === "openrouter" && modelID === "openai/gpt-5-chat"))
           delete provider.models[modelID]
         if (model.status === "alpha" && !Flag.OPENCODE_ENABLE_EXPERIMENTAL_MODELS) delete provider.models[modelID]

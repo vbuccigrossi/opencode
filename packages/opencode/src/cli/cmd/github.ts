@@ -483,6 +483,7 @@ export const GithubRunCommand = cmd({
       let session: { id: string; title: string; version: string }
       let shareId: string | undefined
       let exitCode = 0
+      let unsubSessionEvents: (() => void) | undefined
       type PromptFiles = Awaited<ReturnType<typeof getUserPrompt>>["promptFiles"]
       const triggerCommentId = isCommentEvent
         ? (payload as IssueCommentEvent | PullRequestReviewCommentEvent).comment.id
@@ -533,7 +534,7 @@ export const GithubRunCommand = cmd({
             },
           ],
         })
-        subscribeSessionEvents()
+        unsubSessionEvents = subscribeSessionEvents()
         shareId = await (async () => {
           if (share === false) return
           if (!share && repoData.data.private) return
@@ -671,6 +672,7 @@ export const GithubRunCommand = cmd({
         // Also output the clean error message for the action to capture
         //core.setOutput("prepare_error", e.message);
       } finally {
+        unsubSessionEvents?.()
         if (!useGithubToken) {
           await restoreGitConfig()
           await revokeAppToken()
@@ -868,7 +870,7 @@ export const GithubRunCommand = cmd({
         }
 
         let text = ""
-        Bus.subscribe(MessageV2.Event.PartUpdated, async (evt) => {
+        return Bus.subscribe(MessageV2.Event.PartUpdated, async (evt) => {
           if (evt.properties.part.sessionID !== session.id) return
           //if (evt.properties.part.messageID === messageID) return
           const part = evt.properties.part

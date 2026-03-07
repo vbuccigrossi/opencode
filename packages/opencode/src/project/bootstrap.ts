@@ -16,6 +16,8 @@ import { Graph } from "../graph"
 import { Context } from "../context"
 import { Changelog } from "../session/changelog"
 
+let unsub: (() => void) | undefined
+
 export async function InstanceBootstrap() {
   Log.Default.info("bootstrapping", { directory: Instance.directory })
   await Plugin.init()
@@ -31,7 +33,8 @@ export async function InstanceBootstrap() {
   Context.init()
   Changelog.init()
 
-  Bus.subscribe(Command.Event.Executed, async (payload) => {
+  unsub?.()
+  unsub = Bus.subscribe(Command.Event.Executed, async (payload) => {
     if (payload.properties.name === Command.Default.INIT) {
       await Project.setInitialized(Instance.project.id)
     }

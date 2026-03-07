@@ -48,9 +48,12 @@ export namespace SessionCompaction {
     const context = input.model.limit.context
     if (context === 0) return false
 
-    const count =
-      input.tokens.total ||
-      input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
+    // When limit.input is set, only count input tokens against that limit
+    // (output/thinking tokens don't consume the input window).
+    const count = input.model.limit.input
+      ? input.tokens.input + input.tokens.cache.read + input.tokens.cache.write
+      : input.tokens.total ||
+        input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
 
     const reserved =
       config.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
@@ -122,6 +125,9 @@ export namespace SessionCompaction {
       for (const part of toPrune) {
         if (part.type === "tool" && part.state.status === "completed") {
           part.state.time.compacted = Date.now()
+          part.state.output = "[Old tool result content cleared]"
+          part.state.attachments = []
+          part.state.metadata = undefined as any
           await Session.updatePart(part)
         }
       }

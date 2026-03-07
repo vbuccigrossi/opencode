@@ -39,6 +39,7 @@ import { ReportTool } from "./report"
 import { SecurityTool } from "./security"
 import { SearchTool } from "./search"
 import { GitTool } from "./git"
+import { McpSearchTool } from "./mcp-search"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -149,8 +150,14 @@ export namespace ToolRegistry {
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
+      ...(config.experimental?.mcp_lazy === true ? [McpSearchTool] : []),
       ...custom,
     ]
+  }
+
+  export async function hasMcpSearch(): Promise<boolean> {
+    const tools = await all()
+    return tools.some((t) => t.id === "mcp_search")
   }
 
   export async function ids() {

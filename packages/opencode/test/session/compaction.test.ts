@@ -82,8 +82,12 @@ describe("session.compaction.isOverflow", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const model = createModel({ context: 400_000, input: 272_000, output: 128_000 })
-        const tokens = { input: 271_000, output: 1_000, reasoning: 0, cache: { read: 2_000, write: 0 } }
+        // With limit.input, only input tokens (input + cache.read + cache.write) are counted.
+        // input-only count: 260K + 15K = 275K
+        // fromContext = 300K - 32K(capped output) = 268K, fromInput = 272K - 20K = 252K
+        // usable = max(268K, 252K) = 268K → 275K >= 268K = true
+        const model = createModel({ context: 300_000, input: 272_000, output: 128_000 })
+        const tokens = { input: 260_000, output: 1_000, reasoning: 0, cache: { read: 15_000, write: 0 } }
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
       },
     })
@@ -113,19 +117,15 @@ describe("session.compaction.isOverflow", () => {
     })
   })
 
-  // ─── Bug reproduction tests ───────────────────────────────────────────
-  // These tests demonstrate that when limit.input is set, isOverflow()
-  // does not subtract any headroom for the next model response. This means
-  // compaction only triggers AFTER we've already consumed the full input
-  // budget, leaving zero room for the next API call's output tokens.
-  //
-  // Compare: without limit.input, usable = context - output (reserves space).
-  // With limit.input, usable = limit.input (reserves nothing).
+  // ─── Input-only counting tests ───────────────────────────────────────
+  // When limit.input is set, only input tokens (input + cache.read + cache.write)
+  // are counted — output/thinking tokens don't consume the input window.
+  // This correctly reflects the Anthropic API behavior where input and output
+  // token limits are independent.
   //
   // Related issues: #10634, #8089, #11086, #12621
-  // Open PRs: #6875, #12924
 
-  test("BUG: no headroom when limit.input is set — compaction should trigger near boundary but does not", async () => {
+  test("limit.input triggers compaction based on input-only token count", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -133,62 +133,53 @@ describe("session.compaction.isOverflow", () => {
         // Simulate Claude with prompt caching: input limit = 200K, output limit = 32K
         const model = createModel({ context: 200_000, input: 200_000, output: 32_000 })
 
-        // We've used 198K tokens total. Only 2K under the input limit.
-        // On the next turn, the full conversation (198K) becomes input,
-        // plus the model needs room to generate output — this WILL overflow.
+        // Input-only count: 180K + 3K = 183K
+        // fromInput = 200K - 20K(reserved) = 180K, fromContext = 200K - 32K = 168K
+        // usable = max(168K, 180K) = 180K → 183K >= 180K = true
         const tokens = { input: 180_000, output: 15_000, reasoning: 0, cache: { read: 3_000, write: 0 } }
-        // count = 180K + 3K + 15K = 198K
-        // usable = limit.input = 200K (no output subtracted!)
-        // 198K > 200K = false → no compaction triggered
-
-        // WITHOUT limit.input: usable = 200K - 32K = 168K, and 198K > 168K = true ✓
-        // WITH limit.input: usable = 200K, and 198K > 200K = false ✗
-
-        // With 198K used and only 2K headroom, the next turn will overflow.
-        // Compaction MUST trigger here.
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
       },
     })
   })
 
-  test("BUG: without limit.input, same token count correctly triggers compaction", async () => {
+  test("without limit.input, total token count triggers compaction", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // Same model but without limit.input — uses context - output instead
+        // Without limit.input, all tokens (input+output+cache) are counted
         const model = createModel({ context: 200_000, output: 32_000 })
 
-        // Same token usage as above
+        // Same token usage as above — total count = 180K + 15K + 3K = 198K
         const tokens = { input: 180_000, output: 15_000, reasoning: 0, cache: { read: 3_000, write: 0 } }
-        // count = 198K
-        // usable = context - output = 200K - 32K = 168K
-        // 198K > 168K = true → compaction correctly triggered
-
+        // usable = context - maxOutput = 200K - 32K = 168K
+        // 198K >= 168K = true
         const result = await SessionCompaction.isOverflow({ tokens, model })
-        expect(result).toBe(true) // ← Correct: headroom is reserved
+        expect(result).toBe(true)
       },
     })
   })
 
-  test("BUG: asymmetry — limit.input model allows 30K more usage before compaction than equivalent model without it", async () => {
+  test("limit.input counts only input tokens — output tokens do not consume input window", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // Two models with identical context/output limits, differing only in limit.input
         const withInputLimit = createModel({ context: 200_000, input: 200_000, output: 32_000 })
         const withoutInputLimit = createModel({ context: 200_000, output: 32_000 })
 
-        // 170K total tokens — well above context-output (168K) but below input limit (200K)
+        // 171K input tokens (166K + 5K cache), 10K output → 181K total
         const tokens = { input: 166_000, output: 10_000, reasoning: 0, cache: { read: 5_000, write: 0 } }
 
         const withLimit = await SessionCompaction.isOverflow({ tokens, model: withInputLimit })
         const withoutLimit = await SessionCompaction.isOverflow({ tokens, model: withoutInputLimit })
 
-        // Both models have identical real capacity — they should agree:
-        expect(withLimit).toBe(true) // should compact (170K leaves no room for 32K output)
-        expect(withoutLimit).toBe(true) // correctly compacts (170K > 168K)
+        // With limit.input: only input tokens (171K) are counted against limit (200K - 20K = 180K)
+        // 171K < 180K → no compaction needed yet
+        expect(withLimit).toBe(false)
+        // Without limit.input: total tokens (181K) are counted against context - output (200K - 32K = 168K)
+        // 181K > 168K → compaction triggered
+        expect(withoutLimit).toBe(true)
       },
     })
   })

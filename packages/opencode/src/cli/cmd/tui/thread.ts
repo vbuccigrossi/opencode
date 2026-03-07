@@ -162,6 +162,13 @@ export const TuiThreadCommand = cmd({
         worker.terminate()
       }
 
+      for (const signal of ["SIGHUP", "SIGTERM"] as const) {
+        process.once(signal, async () => {
+          await client.call("shutdown", undefined).catch(() => {})
+          process.kill(process.pid, signal)
+        })
+      }
+
       const prompt = await input(args.prompt)
       const config = await Instance.provide({
         directory: cwd,

@@ -1496,6 +1496,10 @@ export type Config = {
      * Timeout in milliseconds for model context protocol (MCP) requests
      */
     mcp_timeout?: number
+    /**
+     * Enable lazy loading of MCP tools. When enabled, MCP tools are not loaded into context automatically. Instead, use the mcp_search tool to discover and call MCP tools on-demand.
+     */
+    mcp_lazy?: boolean
   }
 }
 

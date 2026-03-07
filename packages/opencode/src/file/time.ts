@@ -9,24 +9,36 @@ export namespace FileTime {
   // All tools that overwrite existing files should run their
   // assert/read/write/update sequence inside withLock(filepath, ...)
   // so concurrent writes to the same file are serialized.
-  export const state = Instance.state(() => {
-    const read: {
-      [sessionID: string]: {
-        [path: string]: Date | undefined
+  export const state = Instance.state(
+    () => {
+      const read: {
+        [sessionID: string]: {
+          [path: string]: Date | undefined
+        }
+      } = {}
+      const locks = new Map<string, Promise<void>>()
+      return {
+        read,
+        locks,
       }
-    } = {}
-    const locks = new Map<string, Promise<void>>()
-    return {
-      read,
-      locks,
-    }
-  })
+    },
+    async (current) => {
+      for (const key of Object.keys(current.read)) {
+        delete current.read[key]
+      }
+      current.locks.clear()
+    },
+  )
 
   export function read(sessionID: string, file: string) {
     log.info("read", { sessionID, file })
     const { read } = state()
     read[sessionID] = read[sessionID] || {}
-    read[sessionID][file] = new Date()
+    // Use the file's actual mtime when available so the assert() comparison
+    // is filesystem-time vs filesystem-time. Using new Date() caused false
+    // positives on Windows where NTFS mtime can lag behind JS clock.
+    const mtime = Filesystem.stat(file)?.mtime
+    read[sessionID][file] = mtime ?? new Date()
   }
 
   export function get(sessionID: string, file: string) {
