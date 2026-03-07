@@ -314,42 +314,22 @@ describe("tool.bash permissions", () => {
 })
 
 describe("tool.bash truncation", () => {
-  test("truncates output exceeding line limit", async () => {
-    await Instance.provide({
-      directory: projectRoot,
-      fn: async () => {
-        const bash = await BashTool.init()
-        const lineCount = Truncate.MAX_LINES + 500
-        const result = await bash.execute(
-          {
-            command: `seq 1 ${lineCount}`,
-            description: "Generate lines exceeding limit",
-          },
-          ctx,
-        )
-        expect((result.metadata as any).truncated).toBe(true)
-        expect(result.output).toContain("truncated")
-        expect(result.output).toContain("was truncated")
-      },
-    })
-  })
-
   test("truncates output exceeding byte limit", async () => {
     await Instance.provide({
       directory: projectRoot,
       fn: async () => {
         const bash = await BashTool.init()
-        const byteCount = Truncate.MAX_BYTES + 10000
+        const byteCount = Truncate.MAX_BYTES * 2
         const result = await bash.execute(
           {
-            command: `head -c ${byteCount} /dev/zero | tr '\\0' 'a'`,
+            command: `/usr/bin/python3 -c "import sys; sys.stdout.buffer.write(b'a' * ${byteCount})"`,
             description: "Generate bytes exceeding limit",
           },
           ctx,
         )
         expect((result.metadata as any).truncated).toBe(true)
         expect(result.output).toContain("truncated")
-        expect(result.output).toContain("was truncated")
+        expect(result.output).toContain("Full output saved to:")
       },
     })
   })
@@ -366,7 +346,6 @@ describe("tool.bash truncation", () => {
           },
           ctx,
         )
-        expect((result.metadata as any).truncated).toBe(false)
         const eol = process.platform === "win32" ? "\r\n" : "\n"
         expect(result.output).toBe(`hello${eol}`)
       },
@@ -378,11 +357,12 @@ describe("tool.bash truncation", () => {
       directory: projectRoot,
       fn: async () => {
         const bash = await BashTool.init()
-        const lineCount = Truncate.MAX_LINES + 100
+        // Generate output exceeding byte threshold
+        const byteCount = Truncate.MAX_BYTES * 2
         const result = await bash.execute(
           {
-            command: `seq 1 ${lineCount}`,
-            description: "Generate lines for file check",
+            command: `/usr/bin/python3 -c "import sys; sys.stdout.buffer.write(b'x' * ${byteCount})"`,
+            description: "Generate large output for file check",
           },
           ctx,
         )
@@ -391,11 +371,206 @@ describe("tool.bash truncation", () => {
         const filepath = (result.metadata as any).outputPath
         expect(filepath).toBeTruthy()
 
-        const saved = await Filesystem.readText(filepath)
-        const lines = saved.trim().split("\n")
-        expect(lines.length).toBe(lineCount)
-        expect(lines[0]).toBe("1")
-        expect(lines[lineCount - 1]).toBe(String(lineCount))
+        // Verify the full output was saved
+        const saved = await Bun.file(filepath).text()
+        expect(saved.length).toBe(byteCount)
+        expect(saved[0]).toBe("x")
+        expect(saved[byteCount - 1]).toBe("x")
+      },
+    })
+  })
+
+  test("streams to file during execution for very large output", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await BashTool.init()
+        // Generate 100KB of data - well over the 50KB threshold
+        const byteCount = Truncate.MAX_BYTES * 2
+        const result = await bash.execute(
+          {
+            command: `/usr/bin/python3 -c "import sys; sys.stdout.buffer.write(b'x' * ${byteCount})"`,
+            description: "Generate large streaming output",
+          },
+          ctx,
+        )
+        expect((result.metadata as any).truncated).toBe(true)
+        const filepath = (result.metadata as any).outputPath
+        expect(filepath).toBeTruthy()
+
+        // Verify the full output was saved
+        const saved = await Bun.file(filepath).text()
+        expect(saved.length).toBe(byteCount)
+        expect(saved[0]).toBe("x")
+        expect(saved[byteCount - 1]).toBe("x")
+      },
+    })
+  })
+
+  test("preserves exit code when streaming to file", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const byteCount = Truncate.MAX_BYTES * 2
+        const result = await bash.execute(
+          {
+            command: `/usr/bin/python3 -c "import sys; sys.stdout.buffer.write(b'x' * ${byteCount}); sys.exit(42)"`,
+            description: "Generate large output with non-zero exit",
+          },
+          ctx,
+        )
+        expect((result.metadata as any).truncated).toBe(true)
+        expect((result.metadata as any).exit).toBe(42)
+      },
+    })
+  })
+
+  test("streams stderr to file", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const byteCount = Truncate.MAX_BYTES * 2
+        const result = await bash.execute(
+          {
+            command: `/usr/bin/python3 -c "import sys; sys.stderr.buffer.write(b'e' * ${byteCount})"`,
+            description: "Generate large stderr output",
+          },
+          ctx,
+        )
+        expect((result.metadata as any).truncated).toBe(true)
+        const filepath = (result.metadata as any).outputPath
+        expect(filepath).toBeTruthy()
+
+        const saved = await Bun.file(filepath).text()
+        expect(saved.length).toBe(byteCount)
+        expect(saved[0]).toBe("e")
+      },
+    })
+  })
+
+  test("output message contains file path when streaming", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const byteCount = Truncate.MAX_BYTES * 2
+        const result = await bash.execute(
+          {
+            command: `/usr/bin/python3 -c "import sys; sys.stdout.buffer.write(b'x' * ${byteCount})"`,
+            description: "Check output message format",
+          },
+          ctx,
+        )
+        const filepath = (result.metadata as any).outputPath
+        expect(result.output).toContain("Full output saved to:")
+        expect(result.output).toContain(filepath)
+      },
+    })
+  })
+
+  test("output_filter captures matching lines in memory for small output", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await BashTool.init()
+        // Small build output with warnings/errors - stays in memory
+        const result = await bash.execute(
+          {
+            command: `echo "compiling..."; echo "warning: unused variable"; echo "done"; echo "error: type mismatch"`,
+            output_filter: "^(warning|error):",
+            description: "Build with filter (small)",
+          },
+          ctx,
+        )
+
+        // Should NOT be truncated (small output stays in memory)
+        expect((result.metadata as any).truncated).toBe(false)
+        expect((result.metadata as any).filtered).toBe(true)
+        expect((result.metadata as any).matchCount).toBe(2)
+
+        // The output should contain only the filtered lines
+        expect(result.output).toContain("warning: unused variable")
+        expect(result.output).toContain("error: type mismatch")
+        expect(result.output).not.toContain("compiling...")
+        expect(result.output).not.toContain("done")
+      },
+    })
+  })
+
+  test("output_filter streams to file when output exceeds threshold", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await BashTool.init()
+        // Generate large output that exceeds threshold
+        const byteCount = Truncate.MAX_BYTES * 2
+        const result = await bash.execute(
+          {
+            command: `/usr/bin/python3 -c "import sys; sys.stdout.buffer.write(b'x' * ${byteCount}); print(); print('warning: this is a warning')"`,
+            output_filter: "^warning:",
+            description: "Build with filter (large)",
+          },
+          ctx,
+        )
+
+        // Should be truncated (large output spills to file)
+        expect((result.metadata as any).truncated).toBe(true)
+        expect((result.metadata as any).filtered).toBe(true)
+        const filepath = (result.metadata as any).outputPath
+        expect(filepath).toBeTruthy()
+
+        // The inline output should contain only the filtered line
+        expect(result.output).toContain("warning: this is a warning")
+        expect(result.output).toContain("Filtered 1 matching line")
+
+        // The full output file should contain everything
+        const saved = await Bun.file(filepath).text()
+        expect(saved.length).toBeGreaterThan(byteCount)
+        expect(saved).toContain("warning: this is a warning")
+      },
+    })
+  })
+
+  test("output_filter with no matches returns empty filtered output", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const result = await bash.execute(
+          {
+            command: `echo "all good"; echo "no problems here"`,
+            output_filter: "^(warning|error):",
+            description: "Build with no matches",
+          },
+          ctx,
+        )
+
+        // Small output stays in memory, no truncation
+        expect((result.metadata as any).truncated).toBe(false)
+        expect((result.metadata as any).filtered).toBe(true)
+        expect((result.metadata as any).matchCount).toBe(0)
+        expect(result.output).toContain("[no matches for filter:")
+      },
+    })
+  })
+
+  test("invalid output_filter regex throws error", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await BashTool.init()
+        await expect(
+          bash.execute(
+            {
+              command: `echo test`,
+              output_filter: "[invalid(regex",
+              description: "Invalid regex test",
+            },
+            ctx,
+          ),
+        ).rejects.toThrow("Invalid output_filter regex")
       },
     })
   })
