@@ -47,6 +47,7 @@ import { Context } from "../context"
 import { ContextPipeline } from "../context/pipeline"
 import { VerifyLoop } from "../verify/loop"
 import { Scratchpad } from "../scratchpad"
+import { SessionState } from "./state"
 import { Memory } from "../memory"
 import { InjectionBudget } from "../util/injection-budget"
 import { iife } from "@/util/iife"
@@ -729,6 +730,18 @@ export namespace SessionPrompt {
         }
       } catch (err) {
         log.warn("scratchpad injection failed, continuing without", { error: err })
+      }
+
+      // Inject structured session state on every step
+      // State survives compaction (stored in tool inputs) and gives the agent
+      // perfect situational awareness of goals, plan, decisions, and working set
+      try {
+        const currentState = SessionState.extract(msgs)
+        if (currentState) {
+          system.push(SessionState.format(currentState))
+        }
+      } catch (err) {
+        log.warn("session state injection failed, continuing without", { error: err })
       }
 
       const result = await processor.process({

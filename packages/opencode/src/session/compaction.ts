@@ -68,7 +68,7 @@ export namespace SessionCompaction {
   export const PRUNE_PROTECT = 40_000
 
   /** Tools whose output is never pruned. */
-  const PRUNE_PROTECTED_TOOLS = ["skill", "think", "verify"]
+  const PRUNE_PROTECTED_TOOLS = ["skill", "think", "verify", "state"]
 
   /** Small outputs (< this many tokens) are pruned last. */
   const SMALL_OUTPUT_THRESHOLD = 100

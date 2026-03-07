@@ -40,6 +40,7 @@ import { SecurityTool } from "./security"
 import { SearchTool } from "./search"
 import { GitTool } from "./git"
 import { McpSearchTool } from "./mcp-search"
+import { StateTool } from "./state"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -147,6 +148,7 @@ export namespace ToolRegistry {
       SecurityTool,
       SearchTool,
       GitTool,
+      StateTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
