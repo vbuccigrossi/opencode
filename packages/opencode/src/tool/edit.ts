@@ -17,6 +17,9 @@ import { Filesystem } from "../util/filesystem"
 import { Instance } from "../project/instance"
 import { Snapshot } from "@/snapshot"
 import { assertExternalDirectory } from "./external-directory"
+import { Graph } from "../graph"
+import { GraphParser } from "../graph/parser"
+import { Changelog } from "../session/changelog"
 
 const MAX_DIAGNOSTICS_PER_FILE = 20
 
@@ -134,6 +137,16 @@ export const EditTool = Tool.define("edit", {
       if (change.removed) filediff.deletions += change.count || 0
     }
 
+    Changelog.record({
+      file: filePath,
+      operation: "edit",
+      toolID: "edit",
+      sessionID: ctx.sessionID,
+      messageID: ctx.messageID,
+      additions: filediff.additions,
+      deletions: filediff.deletions,
+    })
+
     ctx.metadata({
       metadata: {
         diff,
@@ -153,6 +166,31 @@ export const EditTool = Tool.define("edit", {
       const suffix =
         errors.length > MAX_DIAGNOSTICS_PER_FILE ? `\n... and ${errors.length - MAX_DIAGNOSTICS_PER_FILE} more` : ""
       output += `\n\nLSP errors detected in this file, please fix:\n<diagnostics file="${filePath}">\n${limited.map(LSP.Diagnostic.pretty).join("\n")}${suffix}\n</diagnostics>`
+    }
+
+    // Add graph-based impact hints for supported file types
+    try {
+      const relativePath = path.relative(Instance.worktree, filePath)
+      if (GraphParser.isSupported(filePath)) {
+        const projectID = Instance.project.id
+        const nodes = Graph.nodesInFile(projectID, relativePath)
+        if (nodes.length > 0) {
+          const callerHints: string[] = []
+          for (const node of nodes.slice(0, 5)) {
+            const callers = Graph.callersOf(projectID, node.name)
+            if (callers.length > 0) {
+              const callerNames = callers.slice(0, 3).map((c) => `${c.name} (${c.filePath}:${c.startLine})`)
+              callerHints.push(`${node.name} is called by: ${callerNames.join(", ")}${callers.length > 3 ? ` +${callers.length - 3} more` : ""}`)
+            }
+          }
+          if (callerHints.length > 0) {
+            output += `\n\nImpact: The following callers may be affected by this edit:\n${callerHints.join("\n")}`
+            output += `\nConsider using the 'verify' tool to check for errors.`
+          }
+        }
+      }
+    } catch {
+      // Impact hints are optional — continue without them
     }
 
     return {

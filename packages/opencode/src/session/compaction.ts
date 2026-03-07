@@ -50,11 +50,19 @@ export namespace SessionCompaction {
   export const PRUNE_MINIMUM = 20_000
   export const PRUNE_PROTECT = 40_000
 
-  const PRUNE_PROTECTED_TOOLS = ["skill"]
+  /** Tools whose output is never pruned. */
+  const PRUNE_PROTECTED_TOOLS = ["skill", "think", "verify"]
 
-  // goes backwards through parts until there are 40_000 tokens worth of tool
-  // calls. then erases output of previous tool calls. idea is to throw away old
+  /** Small outputs (< this many tokens) are pruned last. */
+  const SMALL_OUTPUT_THRESHOLD = 100
+
+  // Goes backwards through parts until there are 40_000 tokens worth of tool
+  // calls. Then erases output of previous tool calls. Idea is to throw away old
   // tool calls that are no longer relevant.
+  //
+  // Pruning order: large outputs first, then small ones. Protected tools
+  // (skill, think, verify) are never pruned — their outputs are critical
+  // for reasoning context and repair loops.
   export async function prune(input: { sessionID: string }) {
     const config = await Config.get()
     if (config.compaction?.prune === false) return
@@ -62,7 +70,8 @@ export namespace SessionCompaction {
     const msgs = await Session.messages({ sessionID: input.sessionID })
     let total = 0
     let pruned = 0
-    const toPrune = []
+    const largeToPrune: typeof msgs[number]["parts"][number][] = []
+    const smallToPrune: typeof msgs[number]["parts"][number][] = []
     let turns = 0
 
     loop: for (let msgIndex = msgs.length - 1; msgIndex >= 0; msgIndex--) {
@@ -81,15 +90,23 @@ export namespace SessionCompaction {
             total += estimate
             if (total > PRUNE_PROTECT) {
               pruned += estimate
-              toPrune.push(part)
+              // Sort into large/small buckets for smarter pruning order
+              if (estimate >= SMALL_OUTPUT_THRESHOLD) {
+                largeToPrune.push(part)
+              } else {
+                smallToPrune.push(part)
+              }
             }
           }
       }
     }
-    log.info("found", { pruned, total })
+
+    // Prune large outputs first, then small ones if needed
+    const toPrune = [...largeToPrune, ...smallToPrune]
+    log.info("found", { pruned, total, large: largeToPrune.length, small: smallToPrune.length })
     if (pruned > PRUNE_MINIMUM) {
       for (const part of toPrune) {
-        if (part.state.status === "completed") {
+        if (part.type === "tool" && part.state.status === "completed") {
           part.state.time.compacted = Date.now()
           await Session.updatePart(part)
         }

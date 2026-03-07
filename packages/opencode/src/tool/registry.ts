@@ -28,11 +28,27 @@ import { LspTool } from "./lsp"
 import { Truncate } from "./truncation"
 
 import { ApplyPatchTool } from "./apply_patch"
+import { GraphTool } from "./graph"
+import { VerifyTool } from "./verify"
+import { ThinkTool } from "./think"
+import { RememberTool } from "./remember"
+import { DiffTool } from "./diff"
+import { UndoTool } from "./undo"
+import { WatchTool } from "./watch"
+import { ReportTool } from "./report"
+import { SecurityTool } from "./security"
+import { SearchTool } from "./search"
+import { GitTool } from "./git"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
+
+  // OPT-1.1: Cache resolved tools keyed by (modelID, providerID, agentName)
+  type ResolvedTool = Awaited<ReturnType<NonNullable<Tool.Info["init"]>>> & { id: string }
+  const toolsCache = new Map<string, { result: ResolvedTool[]; timestamp: number }>()
+  const TOOLS_CACHE_TTL = 60_000 // 1 minute — invalidated on register()
 
   export const state = Instance.state(async () => {
     const custom = [] as Tool.Info[]
@@ -90,9 +106,11 @@ export namespace ToolRegistry {
     const idx = custom.findIndex((t) => t.id === tool.id)
     if (idx >= 0) {
       custom.splice(idx, 1, tool)
-      return
+    } else {
+      custom.push(tool)
     }
-    custom.push(tool)
+    // Invalidate tools cache when custom tools change
+    toolsCache.clear()
   }
 
   async function all(): Promise<Tool.Info[]> {
@@ -117,6 +135,17 @@ export namespace ToolRegistry {
       CodeSearchTool,
       SkillTool,
       ApplyPatchTool,
+      GraphTool,
+      VerifyTool,
+      ThinkTool,
+      RememberTool,
+      DiffTool,
+      UndoTool,
+      WatchTool,
+      ReportTool,
+      SecurityTool,
+      SearchTool,
+      GitTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
@@ -135,6 +164,13 @@ export namespace ToolRegistry {
     },
     agent?: Agent.Info,
   ) {
+    // OPT-1.1: Return cached tools if available and fresh
+    const cacheKey = `${model.modelID}:${model.providerID}:${agent?.name ?? ""}`
+    const cached = toolsCache.get(cacheKey)
+    if (cached && Date.now() - cached.timestamp < TOOLS_CACHE_TTL) {
+      return cached.result
+    }
+
     const tools = await all()
     const result = await Promise.all(
       tools
@@ -168,6 +204,9 @@ export namespace ToolRegistry {
           }
         }),
     )
+
+    // Cache the result
+    toolsCache.set(cacheKey, { result, timestamp: Date.now() })
     return result
   }
 }

@@ -1160,6 +1160,30 @@ export namespace Config {
             .optional()
             .describe("Tools that should only be available to primary agents."),
           continue_loop_on_deny: z.boolean().optional().describe("Continue the agent loop when a tool call is denied"),
+          auto_verify: z
+            .boolean()
+            .optional()
+            .describe("Automatically run verification (typecheck) after edits and feed errors back for self-repair"),
+          auto_verify_test: z
+            .boolean()
+            .optional()
+            .describe("Include test runner in automatic post-edit verification (slower, default: false)"),
+          max_auto_repairs: z
+            .number()
+            .int()
+            .min(0)
+            .max(10)
+            .optional()
+            .describe("Maximum number of automatic repair attempts per turn (default: 3)"),
+          verify_timeouts: z
+            .object({
+              typecheck: z.number().int().positive().optional().describe("Typecheck timeout in ms (default: 30000)"),
+              test: z.number().int().positive().optional().describe("Test timeout in ms (default: 60000)"),
+              lint: z.number().int().positive().optional().describe("Lint timeout in ms (default: 15000)"),
+              build: z.number().int().positive().optional().describe("Build timeout in ms (default: 60000)"),
+            })
+            .optional()
+            .describe("Per-step verification timeouts"),
           mcp_timeout: z
             .number()
             .int()

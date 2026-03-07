@@ -12,6 +12,7 @@ import { Filesystem } from "../util/filesystem"
 import { Instance } from "../project/instance"
 import { trimDiff } from "./edit"
 import { assertExternalDirectory } from "./external-directory"
+import { Changelog } from "../session/changelog"
 
 const MAX_DIAGNOSTICS_PER_FILE = 20
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
@@ -50,6 +51,18 @@ export const WriteTool = Tool.define("write", {
       event: exists ? "change" : "add",
     })
     FileTime.read(ctx.sessionID, filepath)
+
+    const addedLines = params.content.split("\n").length
+    const removedLines = contentOld.split("\n").length
+    Changelog.record({
+      file: filepath,
+      operation: exists ? "write" : "create",
+      toolID: "write",
+      sessionID: ctx.sessionID,
+      messageID: ctx.messageID,
+      additions: addedLines,
+      deletions: exists ? removedLines : 0,
+    })
 
     let output = "Wrote file successfully."
     await LSP.touchFile(filepath, true)

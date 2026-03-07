@@ -13,6 +13,7 @@ import { LSP } from "../lsp"
 import { Filesystem } from "../util/filesystem"
 import DESCRIPTION from "./apply_patch.txt"
 import { File } from "../file"
+import { Changelog } from "../session/changelog"
 
 const PatchParams = z.object({
   patchText: z.string().describe("The full patch text that describes all changes to be made"),
@@ -224,6 +225,19 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
           file: edited,
         })
       }
+    }
+
+    // Record in changelog
+    for (const change of fileChanges) {
+      Changelog.record({
+        file: change.movePath ?? change.filePath,
+        operation: change.type === "add" ? "create" : change.type === "delete" ? "delete" : "patch",
+        toolID: "apply_patch",
+        sessionID: ctx.sessionID,
+        messageID: ctx.messageID,
+        additions: change.additions,
+        deletions: change.deletions,
+      })
     }
 
     // Publish file change events

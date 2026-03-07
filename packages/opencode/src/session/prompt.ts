@@ -42,6 +42,12 @@ import { Tool } from "@/tool/tool"
 import { PermissionNext } from "@/permission/next"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
+import { Context } from "../context"
+import { ContextPipeline } from "../context/pipeline"
+import { VerifyLoop } from "../verify/loop"
+import { Scratchpad } from "../scratchpad"
+import { Memory } from "../memory"
+import { InjectionBudget } from "../util/injection-budget"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
@@ -325,13 +331,15 @@ export namespace SessionPrompt {
       }
 
       step++
-      if (step === 1)
+      if (step === 1) {
         ensureTitle({
           session,
           modelID: lastUser.model.modelID,
           providerID: lastUser.model.providerID,
           history: msgs,
         })
+        VerifyLoop.resetTurn(sessionID, lastUser.id)
+      }
 
       const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
         if (Provider.ModelNotFoundError.isInstance(e)) {
@@ -655,6 +663,68 @@ export namespace SessionPrompt {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
 
+      // Compute coordinated injection budgets based on model context window
+      const budget = InjectionBudget.compute(model.limit.context)
+
+      // Inject intelligent context from the relevance pipeline (Phase 2)
+      // Only on the first step to avoid redundant work on tool-call loops
+      if (step === 1) {
+        try {
+          const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
+          const userText = lastUserMsg?.parts
+            .filter((p) => p.type === "text")
+            .map((p) => (p as { type: "text"; text: string }).text)
+            .join("\n") ?? ""
+          if (userText.length > 0) {
+            const recentFiles = ContextPipeline.extractRecentFiles(
+              msgs.flatMap((m) => m.parts.map((p) => ({
+                type: p.type,
+                tool: p.type === "tool" ? (p as any).tool : undefined,
+                input: p.type === "tool" ? (p as any).input : undefined,
+              }))),
+            )
+            const ctx = await Context.forMessage(userText, sessionID, recentFiles, {
+              maxTokens: budget.contextTokens,
+            })
+            if (ctx.contextBlock) {
+              system.push(ctx.contextBlock)
+            }
+          }
+        } catch (err) {
+          log.warn("context pipeline failed, continuing without context", { error: err })
+        }
+      }
+
+      // Inject persistent memories from previous sessions (Phase 6)
+      // Only on first step — memories don't change within a turn
+      if (step === 1) {
+        try {
+          const memoryBlock = Memory.format({
+            maxChars: budget.memoryChars,
+            maxEntries: budget.memoryMaxEntries,
+          })
+          if (memoryBlock) {
+            system.push(memoryBlock)
+          }
+        } catch (err) {
+          log.warn("memory injection failed, continuing without", { error: err })
+        }
+      }
+
+      // Inject accumulated scratchpad (think tool reasoning) into system prompt
+      // Runs on every step so the agent always has access to its internal notes
+      try {
+        const scratchpadBlock = Scratchpad.format(msgs, {
+          maxChars: budget.scratchpadChars,
+          maxThoughts: budget.scratchpadMaxThoughts,
+        })
+        if (scratchpadBlock) {
+          system.push(scratchpadBlock)
+        }
+      } catch (err) {
+        log.warn("scratchpad injection failed, continuing without", { error: err })
+      }
+
       const result = await processor.process({
         user: lastUser,
         agent,
@@ -711,8 +781,46 @@ export namespace SessionPrompt {
           overflow: !processor.message.finish,
         })
       }
+
+      // Post-edit verification loop: check for file changes and run verification
+      if (result === "continue") {
+        try {
+          const parts = await MessageV2.parts(processor.message.id)
+          const patchParts = parts.filter((p): p is MessageV2.PatchPart => p.type === "patch")
+          const changedFiles = patchParts.flatMap((p) => p.files)
+
+          if (changedFiles.length > 0 && (await VerifyLoop.shouldVerify(sessionID))) {
+            const errorBlock = await VerifyLoop.verify(sessionID, changedFiles)
+            if (errorBlock) {
+              // Inject a synthetic user message with verification errors
+              // so the agent sees them on the next loop iteration
+              const verifyMsg: MessageV2.User = {
+                id: Identifier.ascending("message"),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              await Session.updateMessage(verifyMsg)
+              await Session.updatePart({
+                id: Identifier.ascending("part"),
+                messageID: verifyMsg.id,
+                sessionID,
+                type: "text",
+                text: errorBlock,
+                synthetic: true,
+              } satisfies MessageV2.TextPart)
+            }
+          }
+        } catch (err) {
+          log.warn("post-edit verification failed, continuing without", { error: err })
+        }
+      }
+
       continue
     }
+    VerifyLoop.cleanup(sessionID)
     SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
