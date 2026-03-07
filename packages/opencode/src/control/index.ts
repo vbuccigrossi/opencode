@@ -9,6 +9,7 @@ export namespace Control {
   export const Account = z.object({
     email: z.string(),
     url: z.string(),
+    orgId: z.string().optional(),
   })
   export type Account = z.infer<typeof Account>
 
@@ -16,6 +17,7 @@ export namespace Control {
     return {
       email: row.email,
       url: row.url,
+      orgId: row.org_id ?? undefined,
     }
   }
 

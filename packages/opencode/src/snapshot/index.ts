@@ -1,6 +1,7 @@
 import { $ } from "bun"
 import path from "path"
 import fs from "fs/promises"
+import os from "os"
 import { Filesystem } from "../util/filesystem"
 import { Log } from "../util/log"
 import { Flag } from "../flag/flag"
@@ -15,6 +16,27 @@ export namespace Snapshot {
   const hour = 60 * 60 * 1000
   const prune = "7.days"
 
+  /**
+   * Check whether the current worktree is safe for snapshotting.
+   * Returns false (and logs a warning) when the worktree is the filesystem
+   * root or the user's home directory — snapshotting those would consume
+   * enormous amounts of storage (bug #16336).
+   */
+  function isSafeWorktree(): boolean {
+    const worktree = Instance.worktree
+    const resolved = path.resolve(worktree)
+    if (resolved === "/") {
+      log.warn("skipping snapshot: worktree is filesystem root", { worktree })
+      return false
+    }
+    const home = os.homedir()
+    if (resolved === path.resolve(home)) {
+      log.warn("skipping snapshot: worktree is user home directory", { worktree, home })
+      return false
+    }
+    return true
+  }
+
   export function init() {
     Scheduler.register({
       id: "snapshot.cleanup",
@@ -26,6 +48,7 @@ export namespace Snapshot {
 
   export async function cleanup() {
     if (Instance.project.vcs !== "git" || Flag.OPENCODE_CLIENT === "acp") return
+    if (!isSafeWorktree()) return
     const cfg = await Config.get()
     if (cfg.snapshot === false) return
     const git = gitdir()
@@ -51,6 +74,7 @@ export namespace Snapshot {
 
   export async function track() {
     if (Instance.project.vcs !== "git" || Flag.OPENCODE_CLIENT === "acp") return
+    if (!isSafeWorktree()) return
     const cfg = await Config.get()
     if (cfg.snapshot === false) return
     const git = gitdir()

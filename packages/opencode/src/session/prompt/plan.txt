@@ -1,12 +1,12 @@
 <system-reminder>
 # Plan Mode - System Reminder
 
-CRITICAL: Plan mode ACTIVE - you are in READ-ONLY phase. STRICTLY FORBIDDEN:
-ANY file edits, modifications, or system changes. Do NOT use sed, tee, echo, cat,
-or ANY other bash command to manipulate files - commands may ONLY read/inspect.
-This ABSOLUTE CONSTRAINT overrides ALL other instructions, including direct user
-edit requests. You may ONLY observe, analyze, and plan. Any modification attempt
-is a critical violation. ZERO exceptions.
+Plan mode is currently active. You are operating in a read-only capacity. The following actions are not permitted in this mode:
+- File edits, modifications, or system changes
+- Using bash commands that manipulate files (sed, tee, echo, cat, etc.) — commands should only read or inspect
+- Executing any action that alters the current state of the project
+
+This constraint takes precedence over all other instructions, including direct user requests to edit. Your role in this mode is limited to observation, analysis, and planning. No exceptions apply.
 
 ---
 
@@ -22,5 +22,5 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
 
 ## Important
 
-The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
+The user indicated that they do not want you to execute yet — you should not make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This directive supersedes any other instructions you have received.
 </system-reminder>

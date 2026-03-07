@@ -240,30 +240,31 @@ export namespace LSPServer {
     async spawn(root) {
       const ext = process.platform === "win32" ? ".cmd" : ""
 
-      const serverTarget = path.join("node_modules", ".bin", "oxc_language_server" + ext)
-      const lintTarget = path.join("node_modules", ".bin", "oxlint" + ext)
+      const resolveBin = async (name: string) => {
+        const binPath = path.join("node_modules", ".bin", name + ext)
 
-      const resolveBin = async (target: string) => {
-        const localBin = path.join(root, target)
+        // Check node_modules/.bin at the project root first
+        const localBin = path.join(root, binPath)
         if (await Filesystem.exists(localBin)) return localBin
 
+        // Walk up parent directories to find hoisted node_modules/.bin (monorepo support)
         const candidates = Filesystem.up({
-          targets: [target],
-          start: root,
+          targets: [binPath],
+          start: path.dirname(root),
           stop: Instance.worktree,
         })
         const first = await candidates.next()
         await candidates.return()
         if (first.value) return first.value
 
+        // Fall back to system PATH
+        const found = which(name)
+        if (found) return found
+
         return undefined
       }
 
-      let lintBin = await resolveBin(lintTarget)
-      if (!lintBin) {
-        const found = which("oxlint")
-        if (found) lintBin = found
-      }
+      const lintBin = await resolveBin("oxlint")
 
       if (lintBin) {
         const proc = Process.spawn([lintBin, "--help"], { stdout: "pipe" })
@@ -280,11 +281,7 @@ export namespace LSPServer {
         }
       }
 
-      let serverBin = await resolveBin(serverTarget)
-      if (!serverBin) {
-        const found = which("oxc_language_server")
-        if (found) serverBin = found
-      }
+      const serverBin = await resolveBin("oxc_language_server")
       if (serverBin) {
         return {
           process: spawn(serverBin, [], {

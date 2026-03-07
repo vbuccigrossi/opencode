@@ -10,6 +10,7 @@ export const ControlAccountTable = sqliteTable(
     access_token: text().notNull(),
     refresh_token: text().notNull(),
     token_expiry: integer(),
+    org_id: text(),
     active: integer({ mode: "boolean" })
       .notNull()
       .$default(() => false),
