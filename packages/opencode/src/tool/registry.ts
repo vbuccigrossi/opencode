@@ -43,6 +43,11 @@ import { McpSearchTool } from "./mcp-search"
 import { StateTool } from "./state"
 import { SandboxTool } from "./sandbox"
 import { ExploreTool } from "./explore"
+import { RefactorTool } from "./refactor"
+import { TestGenTool } from "./testgen"
+import { DocsTool } from "./docs"
+import { TuningTool } from "./tuning"
+import { StagingTool } from "./staging"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -153,6 +158,11 @@ export namespace ToolRegistry {
       StateTool,
       SandboxTool,
       ExploreTool,
+      RefactorTool,
+      TestGenTool,
+      DocsTool,
+      TuningTool,
+      StagingTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
