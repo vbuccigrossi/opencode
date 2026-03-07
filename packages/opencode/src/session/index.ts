@@ -818,7 +818,9 @@ export namespace Session {
       // mismatches across providers. Some providers (OpenRouter, Copilot)
       // include cached tokens in totalTokens differently than Anthropic,
       // causing inflated counts and premature compaction (#3314).
-      const total = adjustedInputTokens + outputTokens + reasoningTokens + cacheReadInputTokens + cacheWriteInputTokens
+      // Note: reasoningTokens is a subset of outputTokens (from
+      // completion_tokens_details), so it must NOT be added separately.
+      const total = adjustedInputTokens + outputTokens + cacheReadInputTokens + cacheWriteInputTokens
 
       const tokens = {
         total,

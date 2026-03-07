@@ -267,9 +267,22 @@ export namespace PermissionNext {
     for (const tool of tools) {
       const permission = EDIT_TOOLS.includes(tool) ? "edit" : tool
 
-      const rule = ruleset.findLast((r) => Wildcard.match(permission, r.permission))
-      if (!rule) continue
-      if (rule.pattern === "*" && rule.action === "deny") result.add(tool)
+      // Use specificity scoring (consistent with evaluate()) so that a
+      // specific allow like { permission: "edit" } beats a catch-all
+      // deny like { permission: "*" }.
+      let bestRule: Rule | undefined
+      let bestSpecificity = -1
+      for (const r of ruleset) {
+        if (!Wildcard.match(permission, r.permission)) continue
+        const nonWild = r.permission.replace(/\*/g, "")
+        const specificity = nonWild.length + (r.permission.includes("*") ? 0 : 100)
+        if (specificity >= bestSpecificity) {
+          bestSpecificity = specificity
+          bestRule = r
+        }
+      }
+      if (!bestRule) continue
+      if (bestRule.pattern === "*" && bestRule.action === "deny") result.add(tool)
     }
     return result
   }
