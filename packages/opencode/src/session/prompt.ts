@@ -1739,9 +1739,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const matchingInvocation = invocations[shellName] ?? invocations[""]
     const args = matchingInvocation?.args
 
-    // Use StreamingOutput to avoid O(n²) memory growth from string concatenation.
-    // Output < threshold stays in memory; output >= threshold spills to disk.
-    const stream = new StreamingOutput()
+    const streaming = new StreamingOutput()
 
     const cwd = Instance.directory
     const shellEnv = await Plugin.trigger(
@@ -1761,8 +1759,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     })
     proc.stdin?.end()
 
-    const handleChunk = (chunk: Buffer) => {
-      const preview = stream.append(chunk)
+    const append = (chunk: Buffer) => {
+      const preview = streaming.append(chunk)
       if (part.state.status === "running") {
         part.state.metadata = {
           output: preview,
@@ -1772,8 +1770,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
     }
 
-    proc.stdout?.on("data", handleChunk)
-    proc.stderr?.on("data", handleChunk)
+    proc.stdout?.on("data", append)
+    proc.stderr?.on("data", append)
 
     let aborted = false
     let exited = false
