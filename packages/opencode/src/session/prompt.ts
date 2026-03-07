@@ -50,6 +50,8 @@ import { Scratchpad } from "../scratchpad"
 import { SessionState } from "./state"
 import { Memory } from "../memory"
 import { InjectionBudget } from "../util/injection-budget"
+import { DynamicContext } from "../context/dynamic"
+import { Monitor } from "../monitor"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate, StreamingOutput } from "@/tool/truncation"
@@ -702,6 +704,22 @@ export namespace SessionPrompt {
         }
       }
 
+      // Inject dynamic working context on steps > 1 (Pillar 18)
+      // On step 1, the static context pipeline runs. On subsequent steps,
+      // inject the evolving working set based on tool results.
+      if (step > 1) {
+        try {
+          const dynamicBlock = DynamicContext.getInjection(
+            sessionID, msgs, Math.floor(budget.contextTokens * 0.4),
+          )
+          if (dynamicBlock) {
+            system.push(dynamicBlock)
+          }
+        } catch (err) {
+          log.warn("dynamic context injection failed, continuing without", { error: err })
+        }
+      }
+
       // Inject persistent memories from previous sessions (Phase 6)
       // Only on first step — memories don't change within a turn
       if (step === 1) {
@@ -744,6 +762,27 @@ export namespace SessionPrompt {
         log.warn("session state injection failed, continuing without", { error: err })
       }
 
+      // Meta-cognitive monitor: detect problematic patterns and inject warnings (Pillar 21)
+      // Pure heuristics — no LLM calls, sub-millisecond overhead
+      if (step > 1) {
+        try {
+          const warnings = Monitor.check(sessionID, msgs)
+          if (warnings.length > 0) {
+            const monitorState = Monitor.getState(sessionID)
+            const monitorBlock = Monitor.format(
+              warnings,
+              monitorState.step,
+              monitorState.tokenEstimate,
+            )
+            if (monitorBlock) {
+              system.push(monitorBlock)
+            }
+          }
+        } catch (err) {
+          log.warn("monitor injection failed, continuing without", { error: err })
+        }
+      }
+
       const result = await processor.process({
         user: lastUser,
         agent,
@@ -765,6 +804,24 @@ export namespace SessionPrompt {
         model,
         toolChoice: format.type === "json_schema" ? "required" : undefined,
       })
+
+      // Post-step: record tool results for dynamic context and monitor
+      try {
+        const stepParts = await MessageV2.parts(processor.message.id)
+        const toolParts = stepParts.filter((p): p is MessageV2.ToolPart => p.type === "tool")
+        if (toolParts.length > 0) {
+          DynamicContext.processToolResults(sessionID, toolParts)
+          Monitor.recordStep(sessionID, toolParts)
+        }
+        // Update token estimates for the monitor
+        if (processor.message.tokens) {
+          const totalTokens = processor.message.tokens.input + processor.message.tokens.output +
+            processor.message.tokens.cache.read + processor.message.tokens.cache.write
+          Monitor.updateTokens(sessionID, totalTokens, model.limit.context)
+        }
+      } catch (err) {
+        log.warn("post-step recording failed, continuing", { error: err })
+      }
 
       // If structured output was captured, save it and exit immediately
       // This takes priority because the StructuredOutput tool was called successfully
@@ -840,6 +897,8 @@ export namespace SessionPrompt {
       continue
     }
     VerifyLoop.cleanup(sessionID)
+    DynamicContext.clear(sessionID)
+    Monitor.clear(sessionID)
     SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
