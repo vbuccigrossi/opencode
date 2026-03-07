@@ -41,6 +41,8 @@ import { SearchTool } from "./search"
 import { GitTool } from "./git"
 import { McpSearchTool } from "./mcp-search"
 import { StateTool } from "./state"
+import { SandboxTool } from "./sandbox"
+import { ExploreTool } from "./explore"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -149,6 +151,8 @@ export namespace ToolRegistry {
       SearchTool,
       GitTool,
       StateTool,
+      SandboxTool,
+      ExploreTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
