@@ -48,6 +48,7 @@ import { TestGenTool } from "./testgen"
 import { DocsTool } from "./docs"
 import { TuningTool } from "./tuning"
 import { StagingTool } from "./staging"
+import { CascadeTool } from "./cascade"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -163,6 +164,7 @@ export namespace ToolRegistry {
       DocsTool,
       TuningTool,
       StagingTool,
+      CascadeTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
