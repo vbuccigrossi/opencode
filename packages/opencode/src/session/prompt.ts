@@ -52,6 +52,7 @@ import { Memory } from "../memory"
 import { InjectionBudget } from "../util/injection-budget"
 import { DynamicContext } from "../context/dynamic"
 import { Monitor } from "../monitor"
+import { Strategy } from "../strategy"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate, StreamingOutput } from "@/tool/truncation"
@@ -684,6 +685,20 @@ export namespace SessionPrompt {
             .filter((p) => p.type === "text")
             .map((p) => (p as { type: "text"; text: string }).text)
             .join("\n") ?? ""
+
+          // Classify the task and inject strategy guidance (Pillar 20)
+          if (userText.length > 0) {
+            try {
+              Strategy.select(sessionID, userText)
+              const strategyBlock = Strategy.getInjection(sessionID)
+              if (strategyBlock) {
+                system.push(strategyBlock)
+              }
+            } catch (err) {
+              log.warn("strategy classification failed, continuing without", { error: err })
+            }
+          }
+
           if (userText.length > 0) {
             const recentFiles = ContextPipeline.extractRecentFiles(
               msgs.flatMap((m) => m.parts.map((p) => ({
@@ -701,6 +716,15 @@ export namespace SessionPrompt {
           }
         } catch (err) {
           log.warn("context pipeline failed, continuing without context", { error: err })
+        }
+      }
+
+      // Inject strategy guidance on subsequent steps (Pillar 20)
+      // Strategy was classified on step 1; re-inject the same block on later steps
+      if (step > 1) {
+        const strategyBlock = Strategy.getInjection(sessionID)
+        if (strategyBlock) {
+          system.push(strategyBlock)
         }
       }
 
@@ -899,6 +923,7 @@ export namespace SessionPrompt {
     VerifyLoop.cleanup(sessionID)
     DynamicContext.clear(sessionID)
     Monitor.clear(sessionID)
+    Strategy.clear(sessionID)
     SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
