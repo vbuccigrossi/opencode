@@ -1,6 +1,7 @@
 import { Verify } from "."
 import { VerifyEngine } from "./engine"
 import { VerifyDetect } from "./detect"
+import { AutoTest } from "./auto-test"
 import { Instance } from "@/project/instance"
 import { Log } from "@/util/log"
 import { Config } from "@/config/config"
@@ -162,6 +163,35 @@ export namespace VerifyLoop {
         if (state) {
           state.lastErrorFiles.clear()
         }
+
+        // Auto-test: if typecheck passed and auto_verify_test is enabled,
+        // discover and run relevant tests for the changed files
+        if (config.experimental?.auto_verify_test === true) {
+          try {
+            const { testFiles, method } = AutoTest.discoverTests(changedFiles)
+            if (testFiles.length > 0) {
+              log.info("running auto-tests", { sessionID, testFiles, method })
+              const testResult = await AutoTest.runTests(testFiles)
+              if (!testResult.success) {
+                if (state) {
+                  state.repairCount++
+                  state.lastErrorFiles = new Set(
+                    testResult.errors
+                      .map((e) => e.file)
+                      .filter((f): f is string => !!f),
+                  )
+                }
+                const maxRepairs = config.experimental?.max_auto_repairs ?? DEFAULT_MAX_REPAIRS
+                const remaining = maxRepairs - (state?.repairCount ?? 1)
+                return AutoTest.formatErrors(testResult, remaining)
+              }
+              log.info("auto-tests passed", { sessionID, testFiles })
+            }
+          } catch (err) {
+            log.warn("auto-test discovery/execution failed", { error: err })
+          }
+        }
+
         return undefined
       }
 

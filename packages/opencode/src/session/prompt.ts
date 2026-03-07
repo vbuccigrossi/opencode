@@ -53,6 +53,7 @@ import { InjectionBudget } from "../util/injection-budget"
 import { DynamicContext } from "../context/dynamic"
 import { Monitor } from "../monitor"
 import { Strategy } from "../strategy"
+import { Correction } from "../correction"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate, StreamingOutput } from "@/tool/truncation"
@@ -686,6 +687,15 @@ export namespace SessionPrompt {
             .map((p) => (p as { type: "text"; text: string }).text)
             .join("\n") ?? ""
 
+          // Analyze user message for corrections (Pillar 43)
+          if (userText.length > 0) {
+            try {
+              Correction.analyze(sessionID, userText)
+            } catch (err) {
+              log.warn("correction analysis failed, continuing without", { error: err })
+            }
+          }
+
           // Classify the task and inject strategy guidance (Pillar 20)
           if (userText.length > 0) {
             try {
@@ -805,6 +815,17 @@ export namespace SessionPrompt {
         } catch (err) {
           log.warn("monitor injection failed, continuing without", { error: err })
         }
+      }
+
+      // Inject real-time corrections from user redirections (Pillar 43)
+      // Runs on every step so the agent always sees accumulated corrections
+      try {
+        const correctionBlock = Correction.format(sessionID)
+        if (correctionBlock) {
+          system.push(correctionBlock)
+        }
+      } catch (err) {
+        log.warn("correction injection failed, continuing without", { error: err })
       }
 
       const result = await processor.process({
