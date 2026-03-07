@@ -233,13 +233,31 @@ export namespace PermissionNext {
     },
   )
 
+  function getSpecificity(pattern: string): number {
+    if (pattern === "*") return 0
+    // Count non-wildcard characters as specificity; patterns with no wildcards
+    // get a large bonus so they always beat wildcard patterns.
+    const nonWild = pattern.replace(/\*/g, "")
+    return nonWild.length + (pattern.includes("*") ? 0 : 100)
+  }
+
   export function evaluate(permission: string, pattern: string, ...rulesets: Ruleset[]): Rule {
     const merged = merge(...rulesets)
     log.info("evaluate", { permission, pattern, ruleset: merged })
-    const match = merged.findLast(
-      (rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern),
-    )
-    return match ?? { action: "ask", permission, pattern: "*" }
+    // Pick the most specific matching rule.  When two rules have the same
+    // specificity the last one in the merged list wins (preserving the old
+    // "later rule overrides" behaviour for equal-specificity entries).
+    let bestMatch: Rule | undefined
+    let bestSpecificity = -1
+    for (const rule of merged) {
+      if (!Wildcard.match(permission, rule.permission) || !Wildcard.match(pattern, rule.pattern)) continue
+      const specificity = getSpecificity(rule.pattern)
+      if (specificity >= bestSpecificity) {
+        bestSpecificity = specificity
+        bestMatch = rule
+      }
+    }
+    return bestMatch ?? { action: "ask", permission, pattern: "*" }
   }
 
   const EDIT_TOOLS = ["edit", "write", "patch", "multiedit"]

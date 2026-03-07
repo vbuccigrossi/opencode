@@ -685,11 +685,18 @@ export namespace MessageV2 {
               })
           }
           if (part.type === "reasoning") {
-            assistantMessage.parts.push({
-              type: "reasoning",
-              text: part.text,
-              ...(differentModel ? {} : { providerMetadata: part.metadata }),
-            })
+            // When replaying with a different model, skip reasoning parts entirely.
+            // Anthropic thinking blocks contain signatures that are model-specific;
+            // sending them without providerMetadata causes "Invalid signature" errors.
+            if (differentModel) continue
+            // Only include reasoning parts that have text content and metadata
+            if (part.text && part.metadata) {
+              assistantMessage.parts.push({
+                type: "reasoning",
+                text: part.text,
+                providerMetadata: part.metadata,
+              })
+            }
           }
         }
         if (assistantMessage.parts.length > 0) {

@@ -4,6 +4,10 @@ export namespace Wildcard {
   export function match(str: string, pattern: string) {
     if (str) str = str.replaceAll("\\", "/")
     if (pattern) pattern = pattern.replaceAll("\\", "/")
+
+    // If pattern has no path separator, also try matching against basename
+    const tryBasename = !pattern.includes("/") && str.includes("/")
+
     let escaped = pattern
       .replace(/[.+^${}()|[\]\\]/g, "\\$&") // escape special regex chars
       .replace(/\*/g, ".*") // * becomes .*
@@ -16,7 +20,16 @@ export namespace Wildcard {
     }
 
     const flags = process.platform === "win32" ? "si" : "s"
-    return new RegExp("^" + escaped + "$", flags).test(str)
+    const regex = new RegExp("^" + escaped + "$", flags)
+    if (regex.test(str)) return true
+
+    // For patterns without path separators, also match against the basename
+    if (tryBasename) {
+      const basename = str.split("/").pop() ?? str
+      if (regex.test(basename)) return true
+    }
+
+    return false
   }
 
   export function all(input: string, patterns: Record<string, any>) {
