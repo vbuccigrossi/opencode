@@ -290,11 +290,13 @@ export namespace LSP {
 
   export async function diagnostics() {
     const results: Record<string, LSPClient.Diagnostic[]> = {}
+    const worktree = Instance.worktree
     for (const result of await runAll(async (client) => client.diagnostics)) {
-      for (const [path, diagnostics] of result.entries()) {
-        const arr = results[path] || []
+      for (const [filePath, diagnostics] of result.entries()) {
+        if (!filePath.startsWith(worktree)) continue
+        const arr = results[filePath] || []
         arr.push(...diagnostics)
-        results[path] = arr
+        results[filePath] = arr
       }
     }
     return results

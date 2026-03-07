@@ -523,7 +523,7 @@ export namespace MessageV2 {
 
     const toModelOutput = (output: unknown) => {
       if (typeof output === "string") {
-        return { type: "text", value: output }
+        return { type: "text", value: output || " " }
       }
 
       if (typeof output === "object") {
@@ -538,7 +538,7 @@ export namespace MessageV2 {
         return {
           type: "content",
           value: [
-            { type: "text", text: outputObject.text },
+            { type: "text", text: outputObject.text || " " },
             ...attachments.map((attachment) => ({
               type: "media",
               mediaType: attachment.mime,
@@ -565,7 +565,7 @@ export namespace MessageV2 {
         }
         result.push(userMessage)
         for (const part of msg.parts) {
-          if (part.type === "text" && !part.ignored)
+          if (part.type === "text" && !part.ignored && part.text.trim())
             userMessage.parts.push({
               type: "text",
               text: part.text,
@@ -621,7 +621,7 @@ export namespace MessageV2 {
           parts: [],
         }
         for (const part of msg.parts) {
-          if (part.type === "text")
+          if (part.type === "text" && part.text.trim())
             assistantMessage.parts.push({
               type: "text",
               text: part.text,

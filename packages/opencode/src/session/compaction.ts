@@ -14,9 +14,22 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
+import { Database, eq } from "../storage/db"
+import { SessionTable } from "./session.sql"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
+
+  /** Update the session's compacting timestamp and bump time_updated. */
+  function setCompacting(sessionID: string, compacting: number | null) {
+    const now = Date.now()
+    Database.use((db) => {
+      db.update(SessionTable)
+        .set({ time_compacting: compacting, time_updated: now })
+        .where(eq(SessionTable.id, sessionID))
+        .run()
+    })
+  }
 
   export const Event = {
     Compacted: BusEvent.define(
@@ -41,9 +54,10 @@ export namespace SessionCompaction {
 
     const reserved =
       config.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
-    const usable = input.model.limit.input
-      ? input.model.limit.input - reserved
-      : context - ProviderTransform.maxOutputTokens(input.model)
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const fromContext = context - maxOutput
+    const fromInput = input.model.limit.input ? input.model.limit.input - reserved : 0
+    const usable = Math.max(fromContext, fromInput)
     return count >= usable
   }
 
@@ -123,6 +137,9 @@ export namespace SessionCompaction {
     auto: boolean
     overflow?: boolean
   }) {
+    // Bug #16395 + #16392: mark session as compacting and bump time_updated
+    setCompacting(input.sessionID, Date.now())
+
     const userMessage = input.messages.findLast((m) => m.info.id === input.parentID)!.info as MessageV2.User
 
     let messages = input.messages
@@ -246,6 +263,7 @@ When constructing the summary, try to stick to this template:
       }).toObject()
       processor.message.finish = "error"
       await Session.updateMessage(processor.message)
+      setCompacting(input.sessionID, null)
       return "stop"
     }
 
@@ -305,7 +323,12 @@ When constructing the summary, try to stick to this template:
         })
       }
     }
-    if (processor.message.error) return "stop"
+    if (processor.message.error) {
+      setCompacting(input.sessionID, null)
+      return "stop"
+    }
+    // Bug #16395 + #16392: clear compacting status and bump time_updated
+    setCompacting(input.sessionID, null)
     Bus.publish(Event.Compacted, { sessionID: input.sessionID })
     return "continue"
   }

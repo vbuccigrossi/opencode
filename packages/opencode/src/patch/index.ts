@@ -324,6 +324,22 @@ export namespace Patch {
       originalLines.pop()
     }
 
+    // Handle empty files: if no original lines, collect all new lines from chunks
+    if (originalLines.length === 0) {
+      const allNewLines: string[] = []
+      for (const chunk of chunks) {
+        allNewLines.push(...chunk.new_lines)
+      }
+      if (allNewLines.length === 0 || allNewLines[allNewLines.length - 1] !== "") {
+        allNewLines.push("")
+      }
+      const newContent = allNewLines.join("\n")
+      return {
+        unified_diff: generateUnifiedDiff(originalContent, newContent),
+        content: newContent,
+      }
+    }
+
     const replacements = computeReplacements(originalLines, filePath, chunks)
     let newLines = applyReplacements(originalLines, replacements)
 
