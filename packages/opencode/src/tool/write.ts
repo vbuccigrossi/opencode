@@ -10,7 +10,7 @@ import { FileWatcher } from "../file/watcher"
 import { FileTime } from "../file/time"
 import { Filesystem } from "../util/filesystem"
 import { Instance } from "../project/instance"
-import { trimDiff } from "./edit"
+import { trimDiff, capDiagnostics } from "./edit"
 import { assertExternalDirectory } from "./external-directory"
 import { Changelog } from "../session/changelog"
 
@@ -87,7 +87,7 @@ export const WriteTool = Tool.define("write", {
     return {
       title: path.relative(Instance.worktree, filepath),
       metadata: {
-        diagnostics,
+        diagnostics: capDiagnostics(diagnostics),
         filepath,
         exists: exists,
       },

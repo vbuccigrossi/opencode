@@ -15,13 +15,22 @@ import { Bus } from "../bus"
 import { FileTime } from "../file/time"
 import { Filesystem } from "../util/filesystem"
 import { Instance } from "../project/instance"
-import { Snapshot } from "@/snapshot"
 import { assertExternalDirectory } from "./external-directory"
 import { Graph } from "../graph"
 import { GraphParser } from "../graph/parser"
 import { Changelog } from "../session/changelog"
 
 const MAX_DIAGNOSTICS_PER_FILE = 20
+const MAX_DIAGNOSTICS_IN_METADATA = 10
+
+export function capDiagnostics(diagnostics: Record<string, any[]>): Record<string, any[]> {
+  const result: Record<string, any[]> = {}
+  for (const [file, issues] of Object.entries(diagnostics)) {
+    const errors = issues.filter((d) => d.severity === 1).slice(0, MAX_DIAGNOSTICS_IN_METADATA)
+    if (errors.length > 0) result[file] = errors
+  }
+  return result
+}
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -125,10 +134,8 @@ export const EditTool = Tool.define("edit", {
       FileTime.read(ctx.sessionID, filePath)
     })
 
-    const filediff: Snapshot.FileDiff = {
+    const filediff = {
       file: filePath,
-      before: contentOld,
-      after: contentNew,
       additions: 0,
       deletions: 0,
     }
@@ -195,7 +202,7 @@ export const EditTool = Tool.define("edit", {
 
     return {
       metadata: {
-        diagnostics,
+        diagnostics: capDiagnostics(diagnostics),
         diff,
         filediff,
       },

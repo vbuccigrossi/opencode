@@ -258,7 +258,11 @@ export namespace LLM {
   async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "user">) {
     const disabled = PermissionNext.disabled(Object.keys(input.tools), input.agent.permission)
     for (const tool of Object.keys(input.tools)) {
-      if (input.user.tools?.[tool] === false || disabled.has(tool)) {
+      // Explicitly enabled tools (e.g. MCP tools granted to subagents) bypass
+      // the agent-level disabled check so they remain available even when the
+      // agent's default permission is "deny *".
+      const explicitlyEnabled = input.user.tools?.[tool] === true
+      if (input.user.tools?.[tool] === false || (disabled.has(tool) && !explicitlyEnabled)) {
         delete input.tools[tool]
       }
     }

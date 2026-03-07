@@ -10,6 +10,7 @@ import { iife } from "@/util/iife"
 import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
+import { MCP } from "../mcp"
 
 const parameters = z.object({
   description: z.string().describe("A short (3-5 words) description of the task"),
@@ -63,6 +64,9 @@ export const TaskTool = Tool.define("task", async (ctx) => {
 
       const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
 
+      // Collect MCP tool names so subagents can use them
+      const mcpToolNames = Object.keys(await MCP.tools())
+
       const session = await iife(async () => {
         if (params.task_id) {
           const found = await Session.get(params.task_id).catch(() => {})
@@ -97,6 +101,11 @@ export const TaskTool = Tool.define("task", async (ctx) => {
               action: "allow" as const,
               permission: t,
             })) ?? []),
+            ...mcpToolNames.map((t) => ({
+              pattern: "*" as const,
+              action: "allow" as const,
+              permission: t,
+            })),
           ],
         })
       })
@@ -138,6 +147,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           todoread: false,
           ...(hasTaskPermission ? {} : { task: false }),
           ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
+          ...Object.fromEntries(mcpToolNames.map((t) => [t, true])),
         },
         parts: promptParts,
       })

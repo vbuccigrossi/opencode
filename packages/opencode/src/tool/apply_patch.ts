@@ -8,7 +8,7 @@ import { Instance } from "../project/instance"
 import { Patch } from "../patch"
 import { createTwoFilesPatch, diffLines } from "diff"
 import { assertExternalDirectory } from "./external-directory"
-import { trimDiff } from "./edit"
+import { trimDiff, capDiagnostics } from "./edit"
 import { LSP } from "../lsp"
 import { Filesystem } from "../util/filesystem"
 import DESCRIPTION from "./apply_patch.txt"
@@ -165,8 +165,6 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
       relativePath: path.relative(Instance.worktree, change.movePath ?? change.filePath).replaceAll("\\", "/"),
       type: change.type,
       diff: change.diff,
-      before: change.oldContent,
-      after: change.newContent,
       additions: change.additions,
       deletions: change.deletions,
       movePath: change.movePath,
@@ -287,7 +285,7 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
       metadata: {
         diff: totalDiff,
         files,
-        diagnostics,
+        diagnostics: capDiagnostics(diagnostics),
       },
       output,
     }

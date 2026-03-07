@@ -600,6 +600,58 @@ export namespace MCP {
     s.status[name] = { status: "disabled" }
   }
 
+  // OpenAI API enforces a 64-character limit on tool names.
+  const MAX_TOOL_NAME_LENGTH = 64
+
+  /**
+   * Build a combined MCP tool name that fits within MAX_TOOL_NAME_LENGTH.
+   *
+   * Strategy:
+   *   1. If "server_tool" fits, use it as-is.
+   *   2. Otherwise, truncate the server name portion to make room, keeping
+   *      the tool name intact (it carries more semantic meaning).
+   *   3. If the tool name alone already exceeds the limit, truncate the
+   *      tool name and omit the server prefix entirely.
+   *   4. Append a short hash suffix when any truncation occurs so that
+   *      distinct original names remain unique after truncation.
+   */
+  function buildToolName(sanitizedServer: string, sanitizedTool: string): string {
+    const separator = "_"
+    const combined = sanitizedServer + separator + sanitizedTool
+
+    if (combined.length <= MAX_TOOL_NAME_LENGTH) {
+      return combined
+    }
+
+    // We need to truncate.  Generate a 6-char hex hash of the full
+    // (pre-truncation) combined name to preserve uniqueness.
+    const hashSuffix = separator + shortHash(combined)
+
+    // Try to keep the full tool name and truncate the server portion.
+    // Budget: MAX - toolName - separator - hashSuffix
+    const serverBudget = MAX_TOOL_NAME_LENGTH - sanitizedTool.length - separator.length - hashSuffix.length
+    if (serverBudget >= 1) {
+      return sanitizedServer.slice(0, serverBudget) + separator + sanitizedTool + hashSuffix
+    }
+
+    // Tool name alone is too long (with hash).  Drop server prefix entirely.
+    const toolBudget = MAX_TOOL_NAME_LENGTH - hashSuffix.length
+    return sanitizedTool.slice(0, toolBudget) + hashSuffix
+  }
+
+  /**
+   * Produce a short deterministic hex hash (6 chars) from an input string.
+   * Uses a simple FNV-1a–style hash; no crypto overhead needed.
+   */
+  function shortHash(input: string): string {
+    let h = 0x811c9dc5 // FNV offset basis
+    for (let i = 0; i < input.length; i++) {
+      h ^= input.charCodeAt(i)
+      h = (h * 0x01000193) | 0 // FNV prime, keep 32-bit
+    }
+    return (h >>> 0).toString(16).padStart(8, "0").slice(0, 6)
+  }
+
   export async function tools() {
     const result: Record<string, Tool> = {}
     const s = await state()
@@ -636,7 +688,8 @@ export namespace MCP {
       for (const mcpTool of toolsResult.tools) {
         const sanitizedClientName = clientName.replace(/[^a-zA-Z0-9_-]/g, "_")
         const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
-        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout)
+        const toolName = buildToolName(sanitizedClientName, sanitizedToolName)
+        result[toolName] = await convertMcpTool(mcpTool, client, timeout)
       }
     }
     return result
