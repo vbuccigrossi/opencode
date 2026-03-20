@@ -54,6 +54,8 @@ import { SystemTool } from "./system"
 import { ContainerTool } from "./container"
 import { ResearchTool } from "./research"
 import { ChangesetTool } from "./changeset"
+import { AlarmTool } from "./alarm"
+import { ModelSwitchTool } from "./model_switch"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -174,6 +176,8 @@ export namespace ToolRegistry {
       ContainerTool,
       ResearchTool,
       ChangesetTool,
+      AlarmTool,
+      ModelSwitchTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),

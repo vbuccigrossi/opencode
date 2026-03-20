@@ -1083,6 +1083,12 @@ export namespace Config {
       small_model: ModelId.describe(
         "Small model to use for tasks like title generation in the format of provider/model",
       ).optional(),
+      model_aliases: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+          'Custom model aliases for quick switching. Maps alias names to provider/model IDs, e.g. {"fast": "anthropic/claude-haiku-4-5-20251001"}',
+        ),
       default_agent: z
         .string()
         .optional()

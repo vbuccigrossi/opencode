@@ -11,6 +11,7 @@ import { Truncate } from "../tool/truncation"
 import { Graph } from "../graph"
 import { Context } from "../context"
 import { Changelog } from "../session/changelog"
+import { Alarm } from "../alarm"
 
 let unsub: (() => void) | undefined
 
@@ -24,6 +25,13 @@ export async function InstanceBootstrap() {
   await Graph.init()
   Context.init()
   Changelog.init()
+
+  // Set up alarm bell notification on fire
+  Alarm.onFire((alarm) => {
+    const label = alarm.label
+    const hasCmd = alarm.command ? ` (check: ${alarm.command})` : ""
+    Log.Default.info(`\x07 Alarm fired: "${label}"${hasCmd}`)
+  })
 
   unsub?.()
   unsub = Bus.subscribe(Command.Event.Executed, async (payload) => {
