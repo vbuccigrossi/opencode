@@ -12,8 +12,11 @@ import { Graph } from "../graph"
 import { Context } from "../context"
 import { Changelog } from "../session/changelog"
 import { Alarm } from "../alarm"
+import { EmbeddingIndexer } from "../embedding/indexer"
+import { EmbeddingProvider } from "../embedding/provider"
 
 let unsub: (() => void) | undefined
+let unsubGraph: (() => void) | undefined
 
 export async function InstanceBootstrap() {
   Log.Default.info("bootstrapping", { directory: Instance.directory })
@@ -31,6 +34,35 @@ export async function InstanceBootstrap() {
     const label = alarm.label
     const hasCmd = alarm.command ? ` (check: ${alarm.command})` : ""
     Log.Default.info(`\x07 Alarm fired: "${label}"${hasCmd}`)
+  })
+
+  // Auto-index embeddings after graph builds (runs in background, non-blocking)
+  unsubGraph?.()
+  unsubGraph = Bus.subscribe(Graph.IndexComplete, async (payload) => {
+    const { projectID, total } = payload.properties
+    if (total === 0) return
+
+    // Run embedding indexing in background — don't block the agent
+    setImmediate(async () => {
+      try {
+        const config = await EmbeddingProvider.getConfig()
+        const available = await EmbeddingProvider.isAvailable(config)
+        if (!available) {
+          Log.Default.info("embedding provider not available, skipping auto-index")
+          return
+        }
+
+        Log.Default.info("auto-indexing embeddings after graph build", { projectID, graphNodes: total })
+        const result = await EmbeddingIndexer.index(projectID, Instance.worktree, config)
+        Log.Default.info("embedding auto-index complete", {
+          indexed: result.indexed,
+          skipped: result.skipped,
+          durationMs: result.durationMs,
+        })
+      } catch (err: any) {
+        Log.Default.warn("embedding auto-index failed", { error: err.message })
+      }
+    })
   })
 
   unsub?.()

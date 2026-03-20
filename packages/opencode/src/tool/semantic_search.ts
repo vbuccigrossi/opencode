@@ -15,9 +15,13 @@ import { Log } from "../util/log"
 export const SemanticSearchTool = Tool.define("semantic_search", async () => ({
   description: `Search your codebase semantically — find code by meaning, not just keywords.
 
+The embedding index is built automatically after each graph build when an embedding
+provider is available. Semantic similarity is also automatically blended into the
+context pipeline, so relevant code is surfaced without explicit searches.
+
 Operations:
 - search: Find code entities similar to a natural language query
-- index: Build or update the embedding index for the current project
+- index: Manually rebuild the embedding index (normally automatic)
 - status: Show embedding index statistics and provider status
 
 Unlike grep/glob which match text patterns, semantic search understands intent:
