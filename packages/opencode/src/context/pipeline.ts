@@ -3,6 +3,8 @@ import { Packer } from "./packer"
 import { Graph } from "@/graph"
 import { Instance } from "@/project/instance"
 import { Log } from "@/util/log"
+import { SemanticSearch } from "@/embedding/search"
+import { EmbeddingStore } from "@/embedding/store"
 
 /**
  * Multi-stage relevance pipeline for intelligent context selection.
@@ -33,6 +35,8 @@ export namespace ContextPipeline {
     signatures: boolean
     /** Custom signal weights */
     weights?: Scorer.Weights
+    /** Semantic reranking weight (0-1). 0 = disabled, 0.3 = default when embeddings exist */
+    semanticWeight?: number
   }
 
   const DEFAULT_CONFIG: Config = {
@@ -111,8 +115,27 @@ export namespace ContextPipeline {
       cfg.weights,
     )
 
+    // Stage 3b: Semantic reranking (if embeddings exist)
+    let reranked = candidates
+    const embeddingStats = EmbeddingStore.stats(projectID)
+    if (embeddingStats.count > 0) {
+      const semanticWeight = cfg.semanticWeight ?? 0.3
+      if (semanticWeight > 0) {
+        try {
+          reranked = await SemanticSearch.rerank(userText, candidates, semanticWeight, projectID)
+          log.info("semantic rerank applied", {
+            candidates: candidates.length,
+            semanticWeight,
+            embeddedNodes: embeddingStats.count,
+          })
+        } catch (err: any) {
+          log.warn("semantic rerank failed, using traditional scores", { error: err.message })
+        }
+      }
+    }
+
     // Filter by minimum score and limit count
-    const filtered = candidates
+    const filtered = reranked
       .filter((c) => c.score >= cfg.minScore)
       .slice(0, cfg.maxCandidates)
 

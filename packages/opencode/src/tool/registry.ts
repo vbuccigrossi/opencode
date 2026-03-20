@@ -56,6 +56,7 @@ import { ResearchTool } from "./research"
 import { ChangesetTool } from "./changeset"
 import { AlarmTool } from "./alarm"
 import { ModelSwitchTool } from "./model_switch"
+import { SemanticSearchTool } from "./semantic_search"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -178,6 +179,7 @@ export namespace ToolRegistry {
       ChangesetTool,
       AlarmTool,
       ModelSwitchTool,
+      SemanticSearchTool,
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),

@@ -1089,6 +1089,20 @@ export namespace Config {
         .describe(
           'Custom model aliases for quick switching. Maps alias names to provider/model IDs, e.g. {"fast": "anthropic/claude-haiku-4-5-20251001"}',
         ),
+      embedding: z
+        .object({
+          baseURL: z
+            .string()
+            .optional()
+            .describe("Base URL for the embedding API (default: http://localhost:11434/v1 for ollama)"),
+          model: z.string().optional().describe("Embedding model name (default: nomic-embed-text)"),
+          apiKey: z.string().optional().describe("API key for authenticated embedding endpoints"),
+          dimensions: z.number().optional().describe("Embedding dimension (auto-detected if not set)"),
+          batchSize: z.number().optional().describe("Batch size for embedding requests (default: 32)"),
+          timeout: z.number().optional().describe("Request timeout in milliseconds (default: 30000)"),
+        })
+        .optional()
+        .describe("Embedding provider configuration for semantic code search"),
       default_agent: z
         .string()
         .optional()
