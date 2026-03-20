@@ -47,7 +47,7 @@ function thinkPart(thought: string): MessageV2.ToolPart {
       metadata: {},
       time: { start: Date.now(), end: Date.now() },
     },
-  }
+  } as unknown as MessageV2.ToolPart
 }
 
 /** Helper to create a read tool part. */
@@ -67,7 +67,7 @@ function readPart(filePath: string, output: string): MessageV2.ToolPart {
       metadata: {},
       time: { start: Date.now(), end: Date.now() },
     },
-  }
+  } as unknown as MessageV2.ToolPart
 }
 
 /** Helper to create a text part. */

@@ -46,7 +46,7 @@ function thinkPart(thought: string): MessageV2.ToolPart {
       metadata: {},
       time: { start: Date.now(), end: Date.now() },
     },
-  } as MessageV2.ToolPart
+  } as unknown as MessageV2.ToolPart
 }
 
 /** Helper to create a non-think tool part */
@@ -66,7 +66,7 @@ function otherToolPart(tool: string, input: Record<string, any>): MessageV2.Tool
       metadata: {},
       time: { start: Date.now(), end: Date.now() },
     },
-  } as MessageV2.ToolPart
+  } as unknown as MessageV2.ToolPart
 }
 
 describe("scratchpad", () => {
@@ -154,7 +154,7 @@ describe("scratchpad", () => {
           error: "Some error",
           time: { start: Date.now(), end: Date.now() },
         },
-      } as MessageV2.ToolPart
+      } as unknown as MessageV2.ToolPart
       const msgs = [mockMessage("assistant", [errorPart])]
       const thoughts = Scratchpad.extractThoughts(msgs)
       expect(thoughts).toHaveLength(1)
@@ -174,7 +174,7 @@ describe("scratchpad", () => {
           input: {},
           raw: "",
         },
-      } as MessageV2.ToolPart
+      } as unknown as MessageV2.ToolPart
       const msgs = [mockMessage("assistant", [pendingPart])]
       expect(Scratchpad.extractThoughts(msgs)).toEqual([])
     })

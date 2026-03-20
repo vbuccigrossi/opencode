@@ -50,7 +50,7 @@ export const WriteTool = Tool.define("write", {
       file: filepath,
       event: exists ? "change" : "add",
     })
-    FileTime.read(ctx.sessionID, filepath)
+    await FileTime.read(ctx.sessionID, filepath)
 
     const addedLines = params.content.split("\n").length
     const removedLines = contentOld.split("\n").length

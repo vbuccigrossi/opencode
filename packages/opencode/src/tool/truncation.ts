@@ -5,7 +5,7 @@ import { Global } from "../global"
 import { Identifier } from "../id/id"
 import { PermissionNext } from "../permission/next"
 import type { Agent } from "../agent/agent"
-import { Scheduler } from "../scheduler"
+import { Truncate as TruncateUpstream } from "./truncate"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
 import { Log } from "../util/log"
@@ -208,12 +208,9 @@ export namespace Truncate {
   }
 
   export function init() {
-    Scheduler.register({
-      id: "tool.truncation.cleanup",
-      interval: HOUR_MS,
-      run: cleanup,
-      scope: "global",
-    })
+    setInterval(() => {
+      cleanup().catch(() => {})
+    }, HOUR_MS)
   }
 
   export async function cleanup() {

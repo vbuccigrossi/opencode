@@ -4,7 +4,6 @@ import { GraphBuilder } from "./builder"
 import { GraphParser } from "./parser"
 import { GraphCache } from "./cache"
 import { Instance } from "@/project/instance"
-import { Scheduler } from "@/scheduler"
 import { Bus } from "@/bus"
 import { Log } from "@/util/log"
 import { File } from "@/file"
@@ -680,14 +679,9 @@ export namespace Graph {
     })
 
     // Register hourly full re-index
-    Scheduler.register({
-      id: "graph.reindex",
-      interval: 60 * 60 * 1000,
-      scope: "instance",
-      async run() {
-        await fullIndex(projectID, directory)
-      },
-    })
+    setInterval(() => {
+      fullIndex(projectID, directory).catch(() => {})
+    }, 60 * 60 * 1000)
 
     log.info("graph initialized", { projectID })
   }
