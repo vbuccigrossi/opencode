@@ -5,6 +5,10 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/util/log"
 import { SemanticSearch } from "@/embedding/search"
 import { EmbeddingStore } from "@/embedding/store"
+import { RAG } from "@/embedding/rag"
+import { RAGFormatter } from "@/embedding/format"
+import { Token } from "@/util/token"
+import { readFileSync } from "fs"
 
 /**
  * Multi-stage relevance pipeline for intelligent context selection.
@@ -37,6 +41,8 @@ export namespace ContextPipeline {
     weights?: Scorer.Weights
     /** Semantic reranking weight (0-1). 0 = disabled, 0.3 = default when embeddings exist */
     semanticWeight?: number
+    /** Maximum tokens to allocate for RAG context (default: 2000) */
+    ragMaxTokens?: number
   }
 
   const DEFAULT_CONFIG: Config = {
@@ -51,12 +57,16 @@ export namespace ContextPipeline {
   export interface Result {
     /** The formatted context block to inject into the system prompt */
     contextBlock: string
+    /** RAG document context block (empty string if no RAG results) */
+    ragContextBlock: string
     /** Number of candidates scored */
     candidatesScored: number
     /** Number of entries packed into context */
     entriesPacked: number
     /** Total tokens used by context */
     tokensUsed: number
+    /** Number of RAG chunks included */
+    ragChunks: number
     /** How long the pipeline took in ms */
     durationMs: number
   }
@@ -79,14 +89,20 @@ export namespace ContextPipeline {
     const start = Date.now()
     const cfg = { ...DEFAULT_CONFIG, ...config }
 
+    // Stage 5 (parallel): RAG context retrieval — runs alongside graph pipeline
+    const ragPromise = fetchRAGContext(userText, cfg.ragMaxTokens ?? 2000)
+
     // Check if graph has any data — skip if not indexed
-    const stats = Graph.stats(projectID)
-    if (stats.nodeCount === 0) {
+    const graphStats = Graph.stats(projectID)
+    if (graphStats.nodeCount === 0) {
+      const ragResult = await ragPromise
       return {
         contextBlock: "",
+        ragContextBlock: ragResult.text,
         candidatesScored: 0,
         entriesPacked: 0,
-        tokensUsed: 0,
+        tokensUsed: ragResult.tokens,
+        ragChunks: ragResult.chunks,
         durationMs: Date.now() - start,
       }
     }
@@ -96,11 +112,14 @@ export namespace ContextPipeline {
 
     // If no seeds extracted, skip — the user's message doesn't reference code
     if (seeds.keywords.length === 0 && seeds.filePaths.length === 0) {
+      const ragResult = await ragPromise
       return {
         contextBlock: "",
+        ragContextBlock: ragResult.text,
         candidatesScored: 0,
         entriesPacked: 0,
-        tokensUsed: 0,
+        tokensUsed: ragResult.tokens,
+        ragChunks: ragResult.chunks,
         durationMs: Date.now() - start,
       }
     }
@@ -139,12 +158,17 @@ export namespace ContextPipeline {
       .filter((c) => c.score >= cfg.minScore)
       .slice(0, cfg.maxCandidates)
 
+    // Wait for RAG results
+    const ragResult = await ragPromise
+
     if (filtered.length === 0) {
       return {
         contextBlock: "",
+        ragContextBlock: ragResult.text,
         candidatesScored: candidates.length,
         entriesPacked: 0,
-        tokensUsed: 0,
+        tokensUsed: ragResult.tokens,
+        ragChunks: ragResult.chunks,
         durationMs: Date.now() - start,
       }
     }
@@ -162,16 +186,59 @@ export namespace ContextPipeline {
       candidatesScored: candidates.length,
       entriesPacked: packed.entries.length,
       tokensUsed: packed.totalTokens,
+      ragChunks: ragResult.chunks,
       dropped: packed.dropped,
       durationMs: Date.now() - start,
     })
 
     return {
       contextBlock: packed.text,
+      ragContextBlock: ragResult.text,
       candidatesScored: candidates.length,
       entriesPacked: packed.entries.length,
-      tokensUsed: packed.totalTokens,
+      tokensUsed: packed.totalTokens + ragResult.tokens,
+      ragChunks: ragResult.chunks,
       durationMs: Date.now() - start,
+    }
+  }
+
+  /**
+   * Fetch relevant RAG document chunks for a user query.
+   *
+   * Searches the RAG index, reads the actual file content for each hit,
+   * and formats it into a context block within a token budget.
+   *
+   * @param userText - User's query text
+   * @param maxTokens - Maximum token budget for RAG context
+   * @returns RAG context block with text, token count, and chunk count
+   */
+  async function fetchRAGContext(
+    userText: string,
+    maxTokens: number,
+  ): Promise<{ text: string; tokens: number; chunks: number }> {
+    try {
+      const configured = await RAG.isConfigured()
+      if (!configured) return { text: "", tokens: 0, chunks: 0 }
+
+      // Hybrid search: vector + FTS keyword + query expansion
+      const results = await RAG.search(userText, 15, 0.25)
+      if (results.length === 0) return { text: "", tokens: 0, chunks: 0 }
+
+      // Use enhanced formatter that groups by category and includes metadata
+      const text = RAGFormatter.formatResults(results, maxTokens)
+      if (!text) return { text: "", tokens: 0, chunks: 0 }
+
+      const finalTokens = Token.estimate(text)
+
+      log.info("RAG context fetched", {
+        results: results.length,
+        tokens: finalTokens,
+      })
+
+      return { text, tokens: finalTokens, chunks: results.length }
+    } catch (err: any) {
+      log.warn("RAG context fetch failed", { error: err.message })
+      return { text: "", tokens: 0, chunks: 0 }
     }
   }
 

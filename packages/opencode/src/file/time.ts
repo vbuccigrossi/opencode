@@ -47,7 +47,7 @@ export namespace FileTime {
   export const layer = Layer.effect(
     Service,
     Effect.gen(function* () {
-      const disableCheck = yield* Flag.OPENCODE_DISABLE_FILETIME_CHECK
+      const disableCheck = yield* Flag.CORTEX_DISABLE_FILETIME_CHECK
       const reads = new Map<SessionID, Map<string, Stamp>>()
       const locks = new Map<string, Semaphore.Semaphore>()
 

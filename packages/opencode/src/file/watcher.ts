@@ -17,7 +17,7 @@ import { FileIgnore } from "./ignore"
 import { Protected } from "./protected"
 import { Log } from "../util/log"
 
-declare const OPENCODE_LIBC: string | undefined
+declare const CORTEX_LIBC: string | undefined
 
 export namespace FileWatcher {
   const log = Log.create({ service: "file.watcher" })
@@ -36,7 +36,7 @@ export namespace FileWatcher {
   const watcher = lazy((): typeof import("@parcel/watcher") | undefined => {
     try {
       const binding = require(
-        `@parcel/watcher-${process.platform}-${process.arch}${process.platform === "linux" ? `-${OPENCODE_LIBC || "glibc"}` : ""}`,
+        `@parcel/watcher-${process.platform}-${process.arch}${process.platform === "linux" ? `-${CORTEX_LIBC || "glibc"}` : ""}`,
       )
       return createWrapper(binding) as typeof import("@parcel/watcher")
     } catch (error) {
@@ -66,7 +66,7 @@ export namespace FileWatcher {
     Service,
     Effect.gen(function* () {
       const instance = yield* InstanceContext
-      if (yield* Flag.OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER) return Service.of({})
+      if (yield* Flag.CORTEX_EXPERIMENTAL_DISABLE_FILEWATCHER) return Service.of({})
 
       log.info("init", { directory: instance.directory })
 
@@ -111,7 +111,7 @@ export namespace FileWatcher {
       const cfg = yield* Effect.promise(() => Config.get())
       const cfgIgnores = cfg.watcher?.ignore ?? []
 
-      if (yield* Flag.OPENCODE_EXPERIMENTAL_FILEWATCHER) {
+      if (yield* Flag.CORTEX_EXPERIMENTAL_FILEWATCHER) {
         yield* subscribe(instance.directory, [...FileIgnore.PATTERNS, ...cfgIgnores, ...protecteds(instance.directory)])
       }
 

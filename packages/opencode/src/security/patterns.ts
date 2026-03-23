@@ -333,7 +333,7 @@ export namespace SecurityPatterns {
     "venv",
     ".venv",
     "target",
-    ".opencode",
+    ".cortex",
   ]
 
   function shouldSkipFile(filePath: string): boolean {

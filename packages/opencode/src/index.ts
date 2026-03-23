@@ -14,6 +14,9 @@ import { Installation } from "./installation"
 import { NamedError } from "@opencode-ai/util/error"
 import { FormatError } from "./cli/error"
 import { ServeCommand } from "./cli/cmd/serve"
+import { ScheduleCommand } from "./cli/cmd/schedule"
+import { TokenCommand } from "./cli/cmd/token"
+import { DeviceCommand } from "./cli/cmd/device"
 import { WorkspaceServeCommand } from "./cli/cmd/workspace-serve"
 import { Filesystem } from "./util/filesystem"
 import { DebugCommand } from "./cli/cmd/debug"
@@ -87,8 +90,8 @@ let cli = yargs(hideBin(process.argv))
     })
 
     process.env.AGENT = "1"
-    process.env.OPENCODE = "1"
-    process.env.OPENCODE_PID = String(process.pid)
+    process.env.CORTEX = "1"
+    process.env.CORTEX_PID = String(process.pid)
 
     Log.Default.info("opencode", {
       version: Installation.VERSION,
@@ -147,6 +150,9 @@ let cli = yargs(hideBin(process.argv))
   .command(UpgradeCommand)
   .command(UninstallCommand)
   .command(ServeCommand)
+  .command(ScheduleCommand)
+  .command(TokenCommand)
+  .command(DeviceCommand)
   .command(WebCommand)
   .command(ModelsCommand)
   .command(StatsCommand)

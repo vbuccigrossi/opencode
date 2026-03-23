@@ -9,8 +9,8 @@ import { Process } from "@/util/process"
 import { buffer } from "node:stream/consumers"
 
 declare global {
-  const OPENCODE_VERSION: string
-  const OPENCODE_CHANNEL: string
+  const CORTEX_VERSION: string
+  const CORTEX_CHANNEL: string
 }
 
 export namespace Installation {
@@ -91,7 +91,7 @@ export namespace Installation {
   }
 
   export async function method() {
-    if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl"
+    if (process.execPath.includes(path.join(".cortex", "bin"))) return "curl"
     if (process.execPath.includes(path.join(".local", "bin"))) return "curl"
     const exec = process.execPath.toLowerCase()
 
@@ -231,9 +231,9 @@ export namespace Installation {
     await Process.text([process.execPath, "--version"], { nothrow: true })
   }
 
-  export const VERSION = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : "local"
-  export const CHANNEL = typeof OPENCODE_CHANNEL === "string" ? OPENCODE_CHANNEL : "local"
-  export const USER_AGENT = `opencode/${CHANNEL}/${VERSION}/${Flag.OPENCODE_CLIENT}`
+  export const VERSION = typeof CORTEX_VERSION === "string" ? CORTEX_VERSION : "local"
+  export const CHANNEL = typeof CORTEX_CHANNEL === "string" ? CORTEX_CHANNEL : "local"
+  export const USER_AGENT = `opencode/${CHANNEL}/${VERSION}/${Flag.CORTEX_CLIENT}`
 
   export async function latest(installMethod?: Method) {
     const detectedMethod = installMethod || (await method())

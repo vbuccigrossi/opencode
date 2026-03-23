@@ -69,19 +69,19 @@ export namespace LSP {
       delete servers[id]
     }
 
-    if (Flag.OPENCODE_EXPERIMENTAL_LSP_TY) {
-      disable("pyright", "LSP server pyright is disabled because OPENCODE_EXPERIMENTAL_LSP_TY is enabled")
+    if (Flag.CORTEX_EXPERIMENTAL_LSP_TY) {
+      disable("pyright", "LSP server pyright is disabled because CORTEX_EXPERIMENTAL_LSP_TY is enabled")
     }
 
-    if (!Flag.OPENCODE_EXPERIMENTAL_LSP_TY) {
+    if (!Flag.CORTEX_EXPERIMENTAL_LSP_TY) {
       disable("ty")
     }
 
-    if (Flag.OPENCODE_EXPERIMENTAL_LSP_RUFF) {
-      disable("pyright", "LSP server pyright is disabled because OPENCODE_EXPERIMENTAL_LSP_RUFF is enabled")
+    if (Flag.CORTEX_EXPERIMENTAL_LSP_RUFF) {
+      disable("pyright", "LSP server pyright is disabled because CORTEX_EXPERIMENTAL_LSP_RUFF is enabled")
     }
 
-    if (!Flag.OPENCODE_EXPERIMENTAL_LSP_RUFF) {
+    if (!Flag.CORTEX_EXPERIMENTAL_LSP_RUFF) {
       disable("ruff")
     }
   }

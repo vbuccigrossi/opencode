@@ -91,7 +91,7 @@ describe("embedding", () => {
     it("returns defaults when no config is set", async () => {
       const config = await EmbeddingProvider.getConfig()
       expect(config.baseURL).toBe("http://localhost:11434/v1")
-      expect(config.model).toBe("nomic-embed-text")
+      expect(config.model.startsWith("nomic-embed-text")).toBe(true)
       expect(config.batchSize).toBe(32)
       expect(config.timeout).toBe(30_000)
     })

@@ -14,9 +14,14 @@ import { Changelog } from "../session/changelog"
 import { Alarm } from "../alarm"
 import { EmbeddingIndexer } from "../embedding/indexer"
 import { EmbeddingProvider } from "../embedding/provider"
+import { RAG } from "../embedding/rag"
+import { FileWatcher } from "../file/watcher"
+import { Crawler } from "../embedding/crawler"
 
 let unsub: (() => void) | undefined
 let unsubGraph: (() => void) | undefined
+let unsubFileWatcher: (() => void) | undefined
+let ragReindexTimer: ReturnType<typeof setTimeout> | undefined
 
 export async function InstanceBootstrap() {
   Log.Default.info("bootstrapping", { directory: Instance.directory })
@@ -63,6 +68,71 @@ export async function InstanceBootstrap() {
         Log.Default.warn("embedding auto-index failed", { error: err.message })
       }
     })
+  })
+
+  // Auto-index RAG on startup when sources are configured (runs in background)
+  setImmediate(async () => {
+    try {
+      const ragConfigured = await RAG.isConfigured()
+      if (!ragConfigured) return
+
+      const config = await EmbeddingProvider.getConfig()
+      const available = await EmbeddingProvider.isAvailable(config)
+      if (!available) {
+        Log.Default.info("embedding provider not available, skipping RAG auto-index")
+        return
+      }
+
+      Log.Default.info("auto-indexing RAG on startup")
+      const result = await RAG.index(undefined, config)
+      Log.Default.info("RAG auto-index complete", {
+        totalFiles: result.totalFiles,
+        changedFiles: result.changedFiles,
+        chunksEmbedded: result.chunksEmbedded,
+        durationMs: result.durationMs,
+      })
+    } catch (err: any) {
+      Log.Default.warn("RAG auto-index failed", { error: err.message })
+    }
+  })
+
+  // Re-index RAG when files change in source directories (debounced)
+  unsubFileWatcher?.()
+  unsubFileWatcher = Bus.subscribe(FileWatcher.Event.Updated, async (payload) => {
+    const { file, event } = payload.properties
+    if (event === "unlink" || event === "change" || event === "add") {
+      // Check if this file is in a RAG source directory
+      try {
+        const ragConfig = await RAG.getConfig()
+        if (ragConfig.sources.length === 0) return
+
+        const resolvedSources = ragConfig.sources.map((s) => Crawler.resolvePath(s))
+        const inSource = resolvedSources.some((src) => file.startsWith(src))
+        if (!inSource) return
+
+        // Debounce: wait 30s after last change before re-indexing
+        if (ragReindexTimer) clearTimeout(ragReindexTimer)
+        ragReindexTimer = setTimeout(async () => {
+          try {
+            const config = await EmbeddingProvider.getConfig()
+            const available = await EmbeddingProvider.isAvailable(config)
+            if (!available) return
+
+            Log.Default.info("RAG re-indexing triggered by file changes")
+            const result = await RAG.index(undefined, config)
+            Log.Default.info("RAG re-index complete", {
+              changedFiles: result.changedFiles,
+              chunksEmbedded: result.chunksEmbedded,
+              durationMs: result.durationMs,
+            })
+          } catch (err: any) {
+            Log.Default.warn("RAG re-index failed", { error: err.message })
+          }
+        }, 30_000)
+      } catch {
+        // Config not available yet — skip
+      }
+    }
   })
 
   unsub?.()

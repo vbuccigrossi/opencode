@@ -44,6 +44,8 @@ import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
 import { MDNS } from "./mdns"
 import { lazy } from "@/util/lazy"
+import { createMcpServer } from "./mcp-server"
+import { SyncRoutes } from "./routes/sync"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -75,13 +77,29 @@ export namespace Server {
           status: 500,
         })
       })
-      .use((c, next) => {
+      .get("/health", (c) => c.json({ ok: true, time: Date.now() }))
+      .use(async (c, next) => {
         // Allow CORS preflight requests to succeed without auth.
-        // Browser clients sending Authorization headers will preflight with OPTIONS.
         if (c.req.method === "OPTIONS") return next()
-        const password = Flag.OPENCODE_SERVER_PASSWORD
+
+        const authHeader = c.req.header("Authorization")
+
+        // Bearer token auth — check first (API tokens for cross-device access)
+        if (authHeader?.startsWith("Bearer ")) {
+          const token = authHeader.slice(7)
+          const { ApiToken } = await import("../auth/token")
+          const info = await ApiToken.validate(token)
+          if (info) {
+            return next()
+          }
+          // Invalid bearer token — reject
+          return c.json({ error: "Invalid or expired API token" }, 401)
+        }
+
+        // Fall back to basic auth if CORTEX_SERVER_PASSWORD is set
+        const password = Flag.CORTEX_SERVER_PASSWORD
         if (!password) return next()
-        const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
+        const username = Flag.CORTEX_SERVER_USERNAME ?? "opencode"
         return basicAuth({ username, password })(c, next)
       })
       .use(async (c, next) => {
@@ -211,6 +229,11 @@ export namespace Server {
               directory,
               init: InstanceBootstrap,
               async fn() {
+                // Start event journal and device push on first request with Instance context
+                const { EventJournal } = await import("../bus/journal")
+                const { DevicePush } = await import("../device/push")
+                EventJournal.start()
+                DevicePush.start()
                 return next()
               },
             })
@@ -251,6 +274,8 @@ export namespace Server {
       .route("/", FileRoutes())
       .route("/", EventRoutes())
       .route("/mcp", McpRoutes())
+      .route("/mcp-server", createMcpServer())
+      .route("/", SyncRoutes())
       .route("/tui", TuiRoutes())
       .post(
         "/instance/dispose",

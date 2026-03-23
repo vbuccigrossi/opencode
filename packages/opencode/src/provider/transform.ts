@@ -18,7 +18,7 @@ function mimeToModality(mime: string): Modality | undefined {
 }
 
 export namespace ProviderTransform {
-  export const OUTPUT_TOKEN_MAX = Flag.OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX || 32_000
+  export const OUTPUT_TOKEN_MAX = Flag.CORTEX_EXPERIMENTAL_OUTPUT_TOKEN_MAX || 32_000
 
   // Maps npm package to the key the AI SDK expects for providerOptions
   function sdkKey(npm: string): string | undefined {
@@ -291,6 +291,8 @@ export namespace ProviderTransform {
 
   export function temperature(model: Provider.Model) {
     const id = model.id.toLowerCase()
+    // Local models need low temperature for reliable tool calling discipline
+    if (model.providerID === "ollama") return 0.1
     if (id.includes("qwen")) return 0.55
     if (id.includes("claude")) return undefined
     if (id.includes("gemini")) return 1.0
@@ -1011,6 +1013,85 @@ export namespace ProviderTransform {
       schema = sanitizeGemini(schema)
     }
 
+    // For ollama/local models:
+    // 1. Convert camelCase property names to snake_case (local models naturally produce snake_case)
+    // 2. Strip verbose property descriptions to save context window tokens
+    if (model.providerID === "ollama") {
+      schema = compactSchemaForOllama(schema as any) as any
+      schema = convertPropertiesToSnakeCase(schema as any) as any
+    }
+
     return schema as JSONSchema7
+  }
+
+  /**
+   * Strip verbose descriptions from JSON schema properties to save tokens.
+   * Keeps the property name and type, removes long description strings.
+   * For local models with 8K context, every token counts.
+   */
+  function compactSchemaForOllama(schema: Record<string, any>): Record<string, any> {
+    if (!schema || typeof schema !== "object") return schema
+    const result = { ...schema }
+    if (result.type === "object" && result.properties) {
+      const newProps: Record<string, any> = {}
+      for (const [key, value] of Object.entries(result.properties as Record<string, any>)) {
+        const prop = { ...value }
+        // Truncate long descriptions to a short hint
+        if (typeof prop.description === "string" && prop.description.length > 80) {
+          prop.description = prop.description.slice(0, 80).replace(/\s+\S*$/, "…")
+        }
+        newProps[key] = prop
+      }
+      result.properties = newProps
+    }
+    return result
+  }
+
+  /**
+   * Convert camelCase property names to snake_case in a JSON schema.
+   * Only transforms top-level `properties` keys and `required` entries.
+   */
+  function convertPropertiesToSnakeCase(schema: Record<string, any>): Record<string, any> {
+    if (!schema || typeof schema !== "object") return schema
+
+    const result = { ...schema }
+
+    if (result.type === "object" && result.properties) {
+      const newProps: Record<string, any> = {}
+      for (const [key, value] of Object.entries(result.properties)) {
+        const snakeKey = camelToSnake(key)
+        newProps[snakeKey] = value
+      }
+      result.properties = newProps
+
+      if (Array.isArray(result.required)) {
+        result.required = result.required.map((r: string) => camelToSnake(r))
+      }
+    }
+
+    return result
+  }
+
+  /** Convert a camelCase string to snake_case. */
+  function camelToSnake(str: string): string {
+    return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
+  }
+
+  /** Convert a snake_case string to camelCase. */
+  export function snakeToCamel(str: string): string {
+    return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
+  }
+
+  /**
+   * Convert snake_case keys in a flat object to camelCase.
+   * Used to transform ollama tool call arguments back to the
+   * camelCase field names that zod schemas expect.
+   */
+  export function snakeToCamelKeys(obj: Record<string, unknown>): Record<string, unknown> {
+    const result: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(obj)) {
+      result[snakeToCamel(key)] = value
+    }
+    return result
   }
 }

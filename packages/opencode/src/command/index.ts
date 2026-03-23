@@ -6,8 +6,12 @@ import { Instance } from "../project/instance"
 import { Identifier } from "../id/id"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
+import PROMPT_SCHEDULE from "./template/schedule.txt"
+import PROMPT_DEVICE from "./template/device.txt"
+import PROMPT_TOKEN from "./template/token.txt"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
+import { executeSchedule, executeDevice, executeToken } from "./execute"
 
 export namespace Command {
   export const Event = {
@@ -34,13 +38,18 @@ export namespace Command {
       template: z.promise(z.string()).or(z.string()),
       subtask: z.boolean().optional(),
       hints: z.array(z.string()),
+      help: z.string().optional(),
     })
     .meta({
       ref: "Command",
     })
 
   // for some reason zod is inferring `string` for z.promise(z.string()).or(z.string()) so we have to manually override it
-  export type Info = Omit<z.infer<typeof Info>, "template"> & { template: Promise<string> | string }
+  export type Info = Omit<z.infer<typeof Info>, "template"> & {
+    template: Promise<string> | string
+    /** Direct execution handler — bypasses the model entirely. */
+    execute?: (args: string) => Promise<string>
+  }
 
   export function hints(template: string): string[] {
     const result: string[] = []
@@ -55,6 +64,9 @@ export namespace Command {
   export const Default = {
     INIT: "init",
     REVIEW: "review",
+    SCHEDULE: "schedule",
+    DEVICE: "device",
+    TOKEN: "token",
   } as const
 
   const state = Instance.state(async () => {
@@ -79,6 +91,84 @@ export namespace Command {
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
+      },
+      [Default.SCHEDULE]: {
+        name: Default.SCHEDULE,
+        description: "manage scheduled tasks [list|create|delete|trigger|update]",
+        source: "command",
+        get template() {
+          return PROMPT_SCHEDULE
+        },
+        execute: executeSchedule,
+        hints: hints(PROMPT_SCHEDULE),
+        help: [
+          "/schedule — manage scheduled tasks",
+          "",
+          "Usage:",
+          "  /schedule list                      List all scheduled tasks",
+          "  /schedule create <name> <cron> <prompt>  Create a new task",
+          "  /schedule delete <id>               Delete a task",
+          "  /schedule trigger <id>              Run a task immediately",
+          "  /schedule update <id> ...            Update a task",
+          "  /schedule enable <id>               Enable a task",
+          "  /schedule disable <id>              Disable a task",
+          "",
+          "Examples:",
+          '  /schedule create daily-check "0 9 * * *" run all tests and report failures',
+          '  /schedule create weekly-report "0 0 * * 1" generate a status report',
+          "  /schedule list",
+          "  /schedule trigger schedule_abc123",
+        ].join("\n"),
+      },
+      [Default.DEVICE]: {
+        name: Default.DEVICE,
+        description: "manage devices for multi-device sync [list|register|remove|sync]",
+        source: "command",
+        get template() {
+          return PROMPT_DEVICE
+        },
+        execute: executeDevice,
+        hints: hints(PROMPT_DEVICE),
+        help: [
+          "/device — manage registered devices for multi-device sync",
+          "",
+          "Usage:",
+          "  /device list                        List all registered devices",
+          "  /device register <name> [type]      Register a new device",
+          "  /device remove <id>                 Remove a device",
+          "  /device sync <id>                   Sync a device (show pending events)",
+          "  /device update <id> ...             Update device settings",
+          "",
+          "Examples:",
+          "  /device register my-phone phone",
+          '  /device register laptop laptop --push-url "https://example.com/hook"',
+          "  /device sync dev_abc123",
+          "  /device list",
+        ].join("\n"),
+      },
+      [Default.TOKEN]: {
+        name: Default.TOKEN,
+        description: "manage API tokens [list|create|revoke]",
+        source: "command",
+        get template() {
+          return PROMPT_TOKEN
+        },
+        execute: executeToken,
+        hints: hints(PROMPT_TOKEN),
+        help: [
+          "/token — manage API tokens for external client authentication",
+          "",
+          "Usage:",
+          "  /token list                         List all API tokens",
+          "  /token create <name> [scopes]       Create a new token (shown once!)",
+          "  /token revoke <id>                  Revoke a token",
+          "",
+          "Examples:",
+          "  /token create my-api-key",
+          '  /token create ci-token --scopes "schedule:read,session:write"',
+          "  /token create temp-key --expires 24h",
+          "  /token revoke tok_abc123",
+        ].join("\n"),
       },
     }
 

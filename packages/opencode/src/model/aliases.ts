@@ -37,6 +37,12 @@ export namespace ModelAlias {
     // Google
     gemini: "google/gemini-2.5-pro",
     flash: "google/gemini-2.5-flash",
+
+    // Local models (ollama)
+    local: "ollama/qwen2.5-coder:32b",
+    ollama: "ollama/qwen2.5-coder:32b",
+    "local-small": "ollama/qwen2.5-coder:7b",
+    deepseek: "ollama/deepseek-coder-v2:16b",
   }
 
   /**

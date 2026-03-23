@@ -1,0 +1,31 @@
+Use the device tool to manage registered devices for multi-device sync.
+
+User request: $ARGUMENTS
+
+---
+
+## How to Handle the Request
+
+Based on the user's input, determine which operation to perform:
+
+1. **No arguments or "list"**: List all registered devices
+   - Use the device tool with operation "list"
+
+2. **"register" or "add" followed by details**: Register a new device
+   - Extract: name and optionally type (phone, laptop, tablet, desktop)
+   - Use the device tool with operation "register"
+   - If push notifications are requested, include push_url and optionally push_events
+
+3. **"remove" or "delete" followed by ID/name**: Remove a device
+   - If given a name, list devices first to find the ID
+   - Use the device tool with operation "remove"
+
+4. **"sync" followed by ID/name**: Sync a device
+   - If given a name, list devices first to find the ID
+   - Use the device tool with operation "sync"
+   - Include include_sessions: true if the user wants session info
+
+5. **"update" followed by details**: Update a device's settings
+   - Use the device tool with operation "update"
+
+If the input is ambiguous, list devices first to give context.

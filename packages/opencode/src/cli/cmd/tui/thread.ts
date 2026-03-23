@@ -14,9 +14,10 @@ import type { EventSource } from "./context/sdk"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { TuiConfig } from "@/config/tui"
 import { Instance } from "@/project/instance"
+import { Daemon } from "@/daemon"
 
 declare global {
-  const OPENCODE_WORKER_PATH: string
+  const CORTEX_WORKER_PATH: string
 }
 
 type RpcClient = ReturnType<typeof Rpc.client<typeof rpc>>
@@ -49,7 +50,7 @@ function createEventSource(client: RpcClient): EventSource {
 }
 
 async function target() {
-  if (typeof OPENCODE_WORKER_PATH !== "undefined") return OPENCODE_WORKER_PATH
+  if (typeof CORTEX_WORKER_PATH !== "undefined") return CORTEX_WORKER_PATH
   const dist = new URL("./cli/cmd/tui/worker.js", import.meta.url)
   if (await Filesystem.exists(fileURLToPath(dist))) return dist
   return new URL("./worker.ts", import.meta.url)
@@ -64,12 +65,12 @@ async function input(value?: string) {
 
 export const TuiThreadCommand = cmd({
   command: "$0 [project]",
-  describe: "start opencode tui",
+  describe: "start cortex tui",
   builder: (yargs) =>
     withNetworkOptions(yargs)
       .positional("project", {
         type: "string",
-        describe: "path to start opencode in",
+        describe: "path to start cortex in",
       })
       .option("model", {
         type: "string",
@@ -204,6 +205,14 @@ export const TuiThreadCommand = cmd({
       setTimeout(() => {
         client.call("checkUpgrade", { directory: cwd }).catch(() => {})
       }, 1000).unref?.()
+
+      // Auto-start the background daemon for scheduled tasks, device sync, etc.
+      // Fire-and-forget — don't block TUI startup.
+      Daemon.start().catch((err) => {
+        Log.Default.warn("daemon auto-start failed", {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
 
       try {
         await tui({

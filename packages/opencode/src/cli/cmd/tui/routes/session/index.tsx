@@ -247,13 +247,10 @@ export function Session() {
     const logo = UI.logo("  ").split(/\r?\n/)
     return exit.message.set(
       [
-        `${logo[0] ?? ""}`,
-        `${logo[1] ?? ""}`,
-        `${logo[2] ?? ""}`,
-        `${logo[3] ?? ""}`,
+        ...logo,
         ``,
         `  ${weak("Session")}${UI.Style.TEXT_NORMAL_BOLD}${title}${UI.Style.TEXT_NORMAL}`,
-        `  ${weak("Continue")}${UI.Style.TEXT_NORMAL_BOLD}opencode -s ${session()?.id}${UI.Style.TEXT_NORMAL}`,
+        `  ${weak("Continue")}${UI.Style.TEXT_NORMAL_BOLD}cortex -s ${session()?.id}${UI.Style.TEXT_NORMAL}`,
         ``,
       ].join("\n"),
     )
@@ -1459,7 +1456,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
     <Show when={props.part.text.trim()}>
       <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
         <Switch>
-          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+          <Match when={Flag.CORTEX_EXPERIMENTAL_MARKDOWN}>
             <markdown
               syntaxStyle={syntax()}
               streaming={true}
@@ -1467,7 +1464,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
               conceal={ctx.conceal()}
             />
           </Match>
-          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+          <Match when={!Flag.CORTEX_EXPERIMENTAL_MARKDOWN}>
             <code
               filetype="markdown"
               drawUnstyledText={false}
@@ -1490,8 +1487,17 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   const ctx = use()
   const sync = useSync()
 
-  // Hide tool if showDetails is false and tool completed successfully
+  // Hide tool if showDetails is false and tool completed successfully,
+  // or if the tool was aborted (not a real error the user needs to see)
+  const isAborted = createMemo(() => {
+    if (props.part.state.status !== "error") return false
+    const err = props.part.state.error
+    if (!err) return false
+    return err === "Tool execution aborted" || err === "The operation was aborted" || err === "Aborted"
+  })
+
   const shouldHide = createMemo(() => {
+    if (isAborted()) return true
     if (ctx.showDetails()) return false
     if (props.part.state.status !== "completed") return false
     return true
@@ -1663,7 +1669,13 @@ function InlineTool(props: {
     return theme.text
   })
 
-  const error = createMemo(() => (props.part.state.status === "error" ? props.part.state.error : undefined))
+  const error = createMemo(() => {
+    if (props.part.state.status !== "error") return undefined
+    const err = props.part.state.error
+    // Suppress abort-related errors — these are lifecycle events, not real failures
+    if (err === "Tool execution aborted" || err === "The operation was aborted" || err === "Aborted") return undefined
+    return err
+  })
 
   const denied = createMemo(
     () =>
@@ -1735,7 +1747,12 @@ function BlockTool(props: {
   const { theme } = useTheme()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
-  const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
+  const error = createMemo(() => {
+    if (props.part?.state.status !== "error") return undefined
+    const err = props.part.state.error
+    if (err === "Tool execution aborted" || err === "The operation was aborted" || err === "Aborted") return undefined
+    return err
+  })
   return (
     <box
       border={["left"]}

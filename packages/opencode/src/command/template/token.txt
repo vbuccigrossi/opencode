@@ -1,0 +1,26 @@
+Use the token tool to manage API tokens for authenticating external clients to the server.
+
+User request: $ARGUMENTS
+
+---
+
+## How to Handle the Request
+
+Based on the user's input, determine which operation to perform:
+
+1. **No arguments or "list"**: List all API tokens
+   - Use the token tool with operation "list"
+   - Note: Full token values are never shown after creation
+
+2. **"create" followed by details**: Create a new API token
+   - Extract: name, and optionally scopes and expiration
+   - Use the token tool with operation "create"
+   - IMPORTANT: The full token is shown ONLY ONCE on creation. Remind the user to save it.
+   - If the user specifies an expiration like "24 hours", convert to expires_in_hours
+
+3. **"revoke" or "delete" followed by ID/name**: Revoke a token
+   - If given a name, list tokens first to find the ID
+   - Use the token tool with operation "revoke"
+   - Confirm with the user before revoking — this is irreversible
+
+If the input is ambiguous, list tokens first to give context.

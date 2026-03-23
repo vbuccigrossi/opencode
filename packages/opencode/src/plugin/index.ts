@@ -23,9 +23,9 @@ export namespace Plugin {
     const client = createOpencodeClient({
       baseUrl: "http://localhost:4096",
       directory: Instance.directory,
-      headers: Flag.OPENCODE_SERVER_PASSWORD
+      headers: Flag.CORTEX_SERVER_PASSWORD
         ? {
-            Authorization: `Basic ${Buffer.from(`${Flag.OPENCODE_SERVER_USERNAME ?? "opencode"}:${Flag.OPENCODE_SERVER_PASSWORD}`).toString("base64")}`,
+            Authorization: `Basic ${Buffer.from(`${Flag.CORTEX_SERVER_USERNAME ?? "opencode"}:${Flag.CORTEX_SERVER_PASSWORD}`).toString("base64")}`,
           }
         : undefined,
       fetch: async (...args) => Server.Default().fetch(...args),

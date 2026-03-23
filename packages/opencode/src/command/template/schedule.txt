@@ -1,0 +1,38 @@
+Use the schedule tool to manage scheduled tasks. Scheduled tasks run prompts on a cron schedule automatically.
+
+User request: $ARGUMENTS
+
+---
+
+## How to Handle the Request
+
+Based on the user's input, determine which operation to perform:
+
+1. **No arguments or "list"**: List all scheduled tasks
+   - Use the schedule tool with operation "list"
+
+2. **"create" followed by details**: Create a new scheduled task
+   - Extract: name, cron expression, and prompt from the user's input
+   - Use the schedule tool with operation "create"
+   - Common cron patterns:
+     - "every hour" → "0 * * * *"
+     - "daily at 9am" → "0 9 * * *"
+     - "every 30 minutes" → "*/30 * * * *"
+     - "weekdays at 8am" → "0 8 * * 1-5"
+     - "every Monday" → "0 0 * * 1"
+
+3. **"delete" or "remove" followed by ID/name**: Delete a task
+   - If given a name, list tasks first to find the ID
+   - Use the schedule tool with operation "delete"
+
+4. **"trigger" or "run" followed by ID/name**: Trigger a task immediately
+   - If given a name, list tasks first to find the ID
+   - Use the schedule tool with operation "trigger"
+
+5. **"update" or "edit" followed by details**: Update a task
+   - Use the schedule tool with operation "update"
+
+6. **"enable" or "disable" followed by ID/name**: Toggle a task
+   - Use the schedule tool with operation "update" with enabled true/false
+
+If the input is ambiguous, list tasks first to give context, then ask what the user wants to do.

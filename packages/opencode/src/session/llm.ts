@@ -66,14 +66,23 @@ export namespace LLM {
     const isCodex = provider.id === "openai" && auth?.type === "oauth"
 
     const system = []
+    const providerPrompt = input.agent.prompt ? [input.agent.prompt] : isCodex ? [] : SystemPrompt.provider(input.model)
+
+    // Debug: log system prompt components for ollama
+    if (input.model.providerID === "ollama" && !input.small) {
+      log.info("ollama system prompt components", {
+        providerPromptLen: providerPrompt.reduce((a, b) => a + b.length, 0),
+        inputSystemCount: input.system.length,
+        inputSystemLens: input.system.map((s) => s.length),
+        inputSystemPreviews: input.system.map((s) => s.slice(0, 80)),
+        userSystemLen: input.user.system?.length ?? 0,
+      })
+    }
+
     system.push(
       [
-        // use agent prompt otherwise provider prompt
-        // For Codex sessions, skip SystemPrompt.provider() since it's sent via options.instructions
-        ...(input.agent.prompt ? [input.agent.prompt] : isCodex ? [] : SystemPrompt.provider(input.model)),
-        // any custom prompt passed into this call
+        ...providerPrompt,
         ...input.system,
-        // any custom prompt from last user message
         ...(input.user.system ? [input.user.system] : []),
       ]
         .filter((x) => x)
@@ -178,46 +187,117 @@ export namespace LLM {
       },
       async experimental_repairToolCall(failed) {
         const name = failed.toolCall.toolName
+        let repairedName = name
+        let nameFixed = false
+
+        // --- Phase 1: Repair tool name ---
+
         // try lowercase first
         if (name !== name.toLowerCase() && tools[name.toLowerCase()]) {
-          l.info("repairing tool call", {
-            tool: name,
-            repaired: name.toLowerCase(),
-          })
-          return { ...failed.toolCall, toolName: name.toLowerCase() }
+          repairedName = name.toLowerCase()
+          nameFixed = true
         }
-        // try stripping underscores/hyphens and case-insensitive match
-        // handles todo_write -> todowrite, Web_Fetch -> webfetch, etc.
-        const normalized = name.replace(/[-_]/g, "").toLowerCase()
-        for (const toolName of Object.keys(tools)) {
-          if (toolName.toLowerCase() === normalized) {
-            l.info("repairing tool call", {
-              tool: name,
-              repaired: toolName,
-            })
-            return { ...failed.toolCall, toolName }
+        if (!nameFixed) {
+          // try stripping underscores/hyphens and case-insensitive match
+          // handles todo_write -> todowrite, Web_Fetch -> webfetch, etc.
+          const normalized = name.replace(/[-_]/g, "").toLowerCase()
+          for (const toolName of Object.keys(tools)) {
+            if (toolName.toLowerCase() === normalized) {
+              repairedName = toolName
+              nameFixed = true
+              break
+            }
+          }
+          if (!nameFixed) {
+            // try alias lookup (config overrides builtins)
+            const builtinAliases: Record<string, string> = {
+              search: "grep",
+              find: "glob",
+              cat: "read",
+              run: "bash",
+              shell: "bash",
+              todo: "todowrite",
+              fetch: "webfetch",
+            }
+            const userAliases = cfg.experimental?.tool_aliases ?? {}
+            const aliases = { ...builtinAliases, ...userAliases }
+            const aliasTarget = aliases[name] ?? aliases[name.toLowerCase()] ?? aliases[normalized]
+            if (aliasTarget && tools[aliasTarget]) {
+              repairedName = aliasTarget
+              nameFixed = true
+            }
           }
         }
-        // try alias lookup (config overrides builtins)
-        const builtinAliases: Record<string, string> = {
-          search: "grep",
-          find: "glob",
-          cat: "read",
-          run: "bash",
-          shell: "bash",
-          todo: "todowrite",
-          fetch: "webfetch",
+
+        // --- Phase 2: Repair argument field names ---
+        // Local models often use wrong field names. Two-step repair:
+        //   a) Common aliases (e.g. "path" → "file_path")
+        //   b) snake_case → camelCase (e.g. "file_path" → "filePath")
+        let repairedInput = failed.toolCall.input
+        try {
+          const parsed = JSON.parse(failed.toolCall.input)
+          if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+            // Step a: Fix common field name aliases that models hallucinate
+            const fieldAliases: Record<string, string> = {
+              path: "file_path",
+              filepath: "file_path",
+              filename: "file_path",
+              file: "file_path",
+              text: "content",
+              body: "content",
+              old: "old_string",
+              new: "new_string",
+              original: "old_string",
+              replacement: "new_string",
+              search: "pattern",
+              query: "pattern",
+              cmd: "command",
+              shell: "command",
+              glob: "pattern",
+            }
+            const aliased: Record<string, unknown> = {}
+            for (const [key, value] of Object.entries(parsed)) {
+              const normalizedKey = key.toLowerCase().replace(/[-_]/g, "")
+              const alias = fieldAliases[normalizedKey]
+              aliased[alias ?? key] = value
+            }
+
+            // Step b: Convert snake_case to camelCase
+            const converted: Record<string, unknown> = {}
+            let didConvert = false
+            for (const [key, value] of Object.entries(aliased)) {
+              const camelKey = key.replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase())
+              if (camelKey !== key) didConvert = true
+              converted[camelKey] = value
+            }
+
+            const inputKeys = Object.keys(parsed)
+            const outputKeys = Object.keys(converted)
+            if (didConvert || inputKeys.join(",") !== outputKeys.join(",")) {
+              repairedInput = JSON.stringify(converted)
+              l.info("repaired tool args", {
+                tool: repairedName,
+                original: inputKeys,
+                converted: outputKeys,
+              })
+            }
+          }
+        } catch {
+          // Input is not valid JSON — leave as-is
         }
-        const userAliases = cfg.experimental?.tool_aliases ?? {}
-        const aliases = { ...builtinAliases, ...userAliases }
-        const aliasTarget = aliases[name] ?? aliases[name.toLowerCase()] ?? aliases[normalized]
-        if (aliasTarget && tools[aliasTarget]) {
-          l.info("repairing tool call via alias", {
+
+        // If we fixed either the name or the args, return the repaired call
+        const targetName = nameFixed ? repairedName : name
+        if ((nameFixed || repairedInput !== failed.toolCall.input) && tools[targetName]) {
+          l.info("repairing tool call", {
             tool: name,
-            alias: aliasTarget,
+            repaired: targetName,
+            argsFixed: repairedInput !== failed.toolCall.input,
           })
-          return { ...failed.toolCall, toolName: aliasTarget }
+          return { ...failed.toolCall, toolName: targetName, input: repairedInput }
         }
+
+        // Nothing could be repaired — forward to invalid tool
         return {
           ...failed.toolCall,
           input: JSON.stringify({
@@ -241,7 +321,7 @@ export namespace LLM {
           "x-opencode-project": Instance.project.id,
           "x-opencode-session": input.sessionID,
           "x-opencode-request": input.user.id,
-          "x-opencode-client": Flag.OPENCODE_CLIENT,
+          "x-opencode-client": Flag.CORTEX_CLIENT,
         }),
         ...input.model.headers,
         ...headers,

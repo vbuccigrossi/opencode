@@ -72,7 +72,7 @@ export namespace DocSearch {
     "venv",
     ".venv",
     "target",
-    ".opencode",
+    ".cortex",
     ".claude",
   ])
 

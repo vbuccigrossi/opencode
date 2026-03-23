@@ -1,5 +1,6 @@
 import { Log } from "@/util/log"
 import { Config } from "@/config/config"
+import { Ollama } from "@/provider/ollama"
 
 /**
  * Embedding provider — generates vector embeddings via any OpenAI-compatible API.
@@ -37,10 +38,55 @@ export namespace EmbeddingProvider {
   /** Detected embedding dimension (cached after first successful call). */
   let detectedDimension: number | undefined
 
+  /** Cached auto-detected embedding model name from ollama. */
+  let autoDetectedModel: string | undefined
+
+  /** Known embedding model name patterns. */
+  const EMBEDDING_MODEL_PATTERNS = [
+    "nomic-embed",
+    "all-minilm",
+    "mxbai-embed",
+    "snowflake-arctic-embed",
+    "bge-",
+    "embed",
+  ]
+
+  /**
+   * Auto-detect an available embedding model from ollama.
+   *
+   * Queries ollama's model list and returns the first model whose name
+   * matches known embedding model patterns. Results are cached.
+   *
+   * @param baseURL - Ollama base URL (without /v1 suffix)
+   * @returns Model name if found, undefined otherwise
+   */
+  async function autoDetectEmbeddingModel(baseURL?: string): Promise<string | undefined> {
+    if (autoDetectedModel) return autoDetectedModel
+
+    // Strip /v1 suffix to get the ollama base URL
+    const ollamaBase = (baseURL ?? "http://localhost:11434/v1").replace(/\/v1\/?$/, "")
+
+    try {
+      const models = await Ollama.listModels(ollamaBase)
+      for (const pattern of EMBEDDING_MODEL_PATTERNS) {
+        const match = models.find((m) => m.toLowerCase().includes(pattern))
+        if (match) {
+          autoDetectedModel = match
+          log.info("auto-detected embedding model", { model: match })
+          return match
+        }
+      }
+    } catch {
+      // ollama not running — fall through
+    }
+    return undefined
+  }
+
   /**
    * Get the effective embedding configuration.
    *
-   * Merges defaults with user config from opencode.jsonc.
+   * Merges defaults with user config from opencode.jsonc. If no model
+   * is explicitly configured, auto-detects an embedding model from ollama.
    *
    * @returns Resolved embedding provider config
    */
@@ -55,7 +101,18 @@ export namespace EmbeddingProvider {
     } catch {
       // No Instance context — use defaults
     }
-    return { ...DEFAULTS, ...userConfig }
+
+    const merged = { ...DEFAULTS, ...userConfig }
+
+    // If user didn't specify a model, try to auto-detect from ollama
+    if (!userConfig.model) {
+      const detected = await autoDetectEmbeddingModel(merged.baseURL)
+      if (detected) {
+        merged.model = detected
+      }
+    }
+
+    return merged
   }
 
   /**
@@ -140,6 +197,7 @@ export namespace EmbeddingProvider {
    */
   export function resetCache(): void {
     detectedDimension = undefined
+    autoDetectedModel = undefined
   }
 
   /**

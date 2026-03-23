@@ -54,9 +54,11 @@ export namespace Context {
     if (cached !== undefined) {
       return {
         contextBlock: cached,
+        ragContextBlock: "",
         candidatesScored: -1,
         entriesPacked: -1,
         tokensUsed: -1,
+        ragChunks: 0,
         durationMs: 0,
       }
     }

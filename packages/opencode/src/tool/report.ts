@@ -33,7 +33,7 @@ Report types:
 - diff_summary: Summary of changes made during a session
 
 Reports persist across compaction (stored outside the message stream).
-Use finalize to export a report to .opencode/reports/ as a markdown file.`,
+Use finalize to export a report to .cortex/reports/ as a markdown file.`,
   parameters: z.object({
     operation: z
       .enum([

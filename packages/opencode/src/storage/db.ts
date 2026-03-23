@@ -15,7 +15,7 @@ import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
 import { init } from "#db"
 
-declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
+declare const CORTEX_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
 export const NotFoundError = NamedError.create(
   "NotFoundError",
@@ -28,12 +28,12 @@ const log = Log.create({ service: "db" })
 
 export namespace Database {
   export const Path = iife(() => {
-    if (Flag.OPENCODE_DB) {
-      if (path.isAbsolute(Flag.OPENCODE_DB)) return Flag.OPENCODE_DB
-      return path.join(Global.Path.data, Flag.OPENCODE_DB)
+    if (Flag.CORTEX_DB) {
+      if (path.isAbsolute(Flag.CORTEX_DB)) return Flag.CORTEX_DB
+      return path.join(Global.Path.data, Flag.CORTEX_DB)
     }
     const channel = Installation.CHANNEL
-    if (["latest", "beta"].includes(channel) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
+    if (["latest", "beta"].includes(channel) || Flag.CORTEX_DISABLE_CHANNEL_DB)
       return path.join(Global.Path.data, "opencode.db")
     const safe = channel.replace(/[^a-zA-Z0-9._-]/g, "-")
     return path.join(Global.Path.data, `opencode-${safe}.db`)
@@ -92,15 +92,15 @@ export namespace Database {
 
     // Apply schema migrations
     const entries =
-      typeof OPENCODE_MIGRATIONS !== "undefined"
-        ? OPENCODE_MIGRATIONS
+      typeof CORTEX_MIGRATIONS !== "undefined"
+        ? CORTEX_MIGRATIONS
         : migrations(path.join(import.meta.dirname, "../../migration"))
     if (entries.length > 0) {
       log.info("applying migrations", {
         count: entries.length,
-        mode: typeof OPENCODE_MIGRATIONS !== "undefined" ? "bundled" : "dev",
+        mode: typeof CORTEX_MIGRATIONS !== "undefined" ? "bundled" : "dev",
       })
-      if (Flag.OPENCODE_SKIP_MIGRATIONS) {
+      if (Flag.CORTEX_SKIP_MIGRATIONS) {
         for (const item of entries) {
           item.sql = "select 1;"
         }

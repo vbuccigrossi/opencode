@@ -2,6 +2,7 @@ import { Database, eq } from "@/storage/db"
 import { GraphNodeTable } from "@/graph/schema.sql"
 import { EmbeddingProvider } from "./provider"
 import { EmbeddingStore } from "./store"
+import { RAG } from "./rag"
 import { Log } from "@/util/log"
 import { createHash } from "crypto"
 import type { Scorer } from "@/context/scorer"
@@ -170,7 +171,23 @@ export namespace SemanticSearch {
       }
     }
 
-    // Blend scores
+    // Also check RAG index for file-level similarity boost
+    const ragFileScores = new Map<string, number>()
+    try {
+      const ragConfigured = await RAG.isConfigured()
+      if (ragConfigured) {
+        const ragResults = await RAG.search(queryText, 20, 0.3)
+        for (const r of ragResults) {
+          const existing = ragFileScores.get(r.filePath) ?? 0
+          ragFileScores.set(r.filePath, Math.max(existing, r.similarity))
+        }
+      }
+    } catch {
+      // RAG search failed — continue without it
+    }
+
+    // Blend scores: combine graph embedding similarity + RAG file-level boost
+    const ragBoostWeight = 0.1 // RAG contributes up to 10% of the final score
     const reranked = candidates.map((c) => {
       // Try to find semantic score via nodeID or filePath:name
       let semanticScore = 0
@@ -180,7 +197,13 @@ export namespace SemanticSearch {
         semanticScore = similarityMap.get(matchedNodeID) ?? 0
       }
 
-      const blendedScore = c.score * (1 - semanticWeight) + semanticScore * semanticWeight
+      // RAG file-level boost: if the candidate's file has RAG hits, boost it
+      const ragScore = ragFileScores.get(c.filePath) ?? 0
+
+      const blendedScore =
+        c.score * (1 - semanticWeight - ragBoostWeight) +
+        semanticScore * semanticWeight +
+        ragScore * ragBoostWeight
 
       return { ...c, score: blendedScore }
     })

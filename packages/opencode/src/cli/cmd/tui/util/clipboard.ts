@@ -4,23 +4,80 @@ import { lazy } from "../../../../util/lazy.js"
 import { tmpdir } from "os"
 import path from "path"
 import fs from "fs/promises"
+import { existsSync, openSync, writeSync, closeSync } from "fs"
 import { Filesystem } from "../../../../util/filesystem"
 import { Process } from "../../../../util/process"
 import { which } from "../../../../util/which"
+import { Global } from "../../../../global"
+
+/**
+ * Auto-detect DISPLAY when not set (e.g. SSH into a graphical machine).
+ * Checks /tmp/.X11-unix/ for active X sockets and returns the first match.
+ */
+function detectDisplay(): string | undefined {
+  if (process.env["DISPLAY"]) return process.env["DISPLAY"]
+  try {
+    const sockets = ["/tmp/.X11-unix/X0", "/tmp/.X11-unix/X1"]
+    for (const sock of sockets) {
+      if (existsSync(sock)) return `:${sock.slice(-1)}`
+    }
+  } catch {}
+  return undefined
+}
+
+/**
+ * Test whether an X display actually responds to connections.
+ * Many headless/SSH setups have stale X sockets that hang forever.
+ * Returns true if we can connect and get a response within the timeout.
+ */
+async function testXDisplay(display: string): Promise<boolean> {
+  try {
+    const result = await Promise.race([
+      Process.run(["xdpyinfo", "-display", display], { nothrow: true }),
+      new Promise<{ code: number }>((resolve) => setTimeout(() => resolve({ code: -1 }), 1500)),
+    ])
+    return result.code === 0
+  } catch {
+    return false
+  }
+}
 
 /**
  * Writes text to clipboard via OSC 52 escape sequence.
  * This allows clipboard operations to work over SSH by having
  * the terminal emulator handle the clipboard locally.
+ *
+ * Writes directly to /dev/tty to bypass any stdout interception
+ * by the TUI renderer (alternate screen buffer, etc).
  */
 function writeOsc52(text: string): void {
-  if (!process.stdout.isTTY) return
   const base64 = Buffer.from(text).toString("base64")
   const osc52 = `\x1b]52;c;${base64}\x07`
   const passthrough = process.env["TMUX"] || process.env["STY"]
   const sequence = passthrough ? `\x1bPtmux;\x1b${osc52}\x1b\\` : osc52
-  process.stdout.write(sequence)
+
+  // Try multiple paths to reach the actual terminal:
+  // 1. /dev/tty — the controlling terminal
+  // 2. SSH_TTY — the SSH pseudo-terminal
+  // 3. stdout — last resort if it's a TTY
+  const targets = ["/dev/tty", process.env["SSH_TTY"]].filter(Boolean) as string[]
+  for (const target of targets) {
+    try {
+      const fd = openSync(target, "w")
+      writeSync(fd, sequence)
+      closeSync(fd)
+      return
+    } catch {}
+  }
+  if (process.stdout.isTTY) process.stdout.write(sequence)
 }
+
+/**
+ * File-based clipboard fallback for environments where no clipboard
+ * mechanism works (SSH without OSC52 support, no X display, etc).
+ * Writes to a known location so the user can retrieve it.
+ */
+const CLIPBOARD_FILE = path.join(Global.Path.data, "clipboard.txt")
 
 export namespace Clipboard {
   export interface Content {
@@ -32,7 +89,7 @@ export namespace Clipboard {
     const os = platform()
 
     if (os === "darwin") {
-      const tmpfile = path.join(tmpdir(), "opencode-clipboard.png")
+      const tmpfile = path.join(tmpdir(), "cortex-clipboard.png")
       try {
         await Process.run(
           [
@@ -77,11 +134,16 @@ export namespace Clipboard {
       if (wayland.stdout.byteLength > 0) {
         return { data: Buffer.from(wayland.stdout).toString("base64"), mime: "image/png" }
       }
-      const x11 = await Process.run(["xclip", "-selection", "clipboard", "-t", "image/png", "-o"], {
-        nothrow: true,
-      })
-      if (x11.stdout.byteLength > 0) {
-        return { data: Buffer.from(x11.stdout).toString("base64"), mime: "image/png" }
+      // Only try xclip if X display is actually reachable
+      if (xDisplayReachable && which("xclip")) {
+        const display = detectDisplay()!
+        const x11 = await Process.run(["xclip", "-selection", "clipboard", "-t", "image/png", "-o"], {
+          nothrow: true,
+          env: { DISPLAY: display },
+        })
+        if (x11.stdout.byteLength > 0) {
+          return { data: Buffer.from(x11.stdout).toString("base64"), mime: "image/png" }
+        }
       }
     }
 
@@ -89,9 +151,18 @@ export namespace Clipboard {
     if (text) {
       return { data: text, mime: "text/plain" }
     }
+
+    // File-based fallback — read from clipboard file
+    try {
+      const text = await Filesystem.readText(CLIPBOARD_FILE)
+      if (text) return { data: text, mime: "text/plain" }
+    } catch {}
   }
 
-  const getCopyMethod = lazy(() => {
+  // Cache the X display reachability test result
+  let xDisplayReachable: boolean | null = null
+
+  const getCopyMethod = lazy(async () => {
     const os = platform()
 
     if (os === "darwin" && which("osascript")) {
@@ -113,27 +184,40 @@ export namespace Clipboard {
           await proc.exited.catch(() => {})
         }
       }
-      if (which("xclip")) {
-        console.log("clipboard: using xclip")
-        return async (text: string) => {
-          const proc = Process.spawn(["xclip", "-selection", "clipboard"], {
-            stdin: "pipe",
-            stdout: "ignore",
-            stderr: "ignore",
-          })
-          if (!proc.stdin) return
-          proc.stdin.write(text)
-          proc.stdin.end()
-          await proc.exited.catch(() => {})
+
+      const display = detectDisplay()
+      if (display && which("xclip")) {
+        // Test if X display actually responds — stale sockets hang forever
+        const reachable = await testXDisplay(display)
+        xDisplayReachable = reachable
+        if (reachable) {
+          console.log(`clipboard: using xclip (DISPLAY=${display})`)
+          return async (text: string) => {
+            const proc = Process.spawn(["xclip", "-selection", "clipboard"], {
+              stdin: "pipe",
+              stdout: "ignore",
+              stderr: "ignore",
+              env: { DISPLAY: display },
+            })
+            if (!proc.stdin) return
+            proc.stdin.write(text)
+            proc.stdin.end()
+            // xclip forks to hold the X selection until another copy replaces it.
+            // Don't await — let it live in the background.
+            proc.unref()
+          }
         }
+        console.log(`clipboard: X display ${display} not responding, skipping xclip`)
       }
-      if (which("xsel")) {
-        console.log("clipboard: using xsel")
+
+      if (display && which("xsel")) {
+        console.log(`clipboard: using xsel (DISPLAY=${display})`)
         return async (text: string) => {
           const proc = Process.spawn(["xsel", "--clipboard", "--input"], {
             stdin: "pipe",
             stdout: "ignore",
             stderr: "ignore",
+            env: { DISPLAY: display },
           })
           if (!proc.stdin) return
           proc.stdin.write(text)
@@ -169,14 +253,16 @@ export namespace Clipboard {
       }
     }
 
-    console.log("clipboard: no native support")
+    // File-based fallback — always works regardless of display server
+    console.log(`clipboard: using file fallback (${CLIPBOARD_FILE})`)
     return async (text: string) => {
-      await clipboardy.write(text).catch(() => {})
+      await Filesystem.write(CLIPBOARD_FILE, text)
     }
   })
 
   export async function copy(text: string): Promise<void> {
     writeOsc52(text)
-    await getCopyMethod()(text)
+    const method = await getCopyMethod()
+    await method(text)
   }
 }

@@ -56,6 +56,7 @@ import { DynamicContext } from "../context/dynamic"
 import { Monitor } from "../monitor"
 import { Strategy } from "../strategy"
 import { Correction } from "../correction"
+import { ErrorRAG } from "../embedding/error-rag"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncate"
@@ -66,6 +67,40 @@ import { normalizeNul } from "@/util/redirection"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
+
+/**
+ * Load only user-specified instruction files for ollama models.
+ * Skips CLAUDE.md, AGENTS.md, and other auto-discovered instruction files
+ * to keep the system prompt small enough for local models.
+ */
+async function loadOllamaInstructions(): Promise<string[]> {
+  try {
+    const { Config } = await import("@/config/config")
+    const config = await Config.get()
+    if (!config.instructions || config.instructions.length === 0) return []
+
+    const results: string[] = []
+    for (const instruction of config.instructions) {
+      if (instruction.startsWith("http://") || instruction.startsWith("https://")) continue
+      let resolved = instruction
+      if (resolved.startsWith("~/")) {
+        resolved = path.join(os.homedir(), resolved.slice(2))
+      }
+      if (!path.isAbsolute(resolved)) {
+        resolved = path.join(Instance.directory, resolved)
+      }
+      try {
+        const content = await fs.readFile(resolved, "utf-8")
+        if (content.trim()) results.push(content.trim())
+      } catch {
+        // File not found — skip
+      }
+    }
+    return results
+  } catch {
+    return []
+  }
+}
 
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
 
@@ -308,6 +343,11 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
+    // Cache RAG context across steps so ollama models retain domain knowledge
+    // during tool-call loops. Without this, RAG is only injected on step 0
+    // and the model loses all context about CVEs, rules, etc.
+    let cachedRagBlock: string | undefined
+    let cachedErrorRagBlock: string | undefined
     const session = await Session.get(sessionID)
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
@@ -669,12 +709,19 @@ export namespace SessionPrompt {
       await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
       // Build system prompt, adding structured output instruction if needed
-      const skills = await SystemPrompt.skills(agent)
+      const isOllamaProvider = model.providerID === "ollama"
+      // All ollama models get reduced prompts — context windows are too small
+      // for MCP servers, skills, and verbose system prompts.
+      const skills = isOllamaProvider ? undefined : await SystemPrompt.skills(agent)
       const system = [
         ...(await SystemPrompt.environment(model)),
         ...(skills ? [skills] : []),
-        ...(await SystemPrompt.mcpServers()),
-        ...(await InstructionPrompt.system()),
+        // Skip MCP servers for all ollama — they add tool schemas that overflow context
+        ...(isOllamaProvider ? [] : await SystemPrompt.mcpServers()),
+        // All ollama models: only load user-specified instruction files.
+        // Skip CLAUDE.md/AGENTS.md — they contain host-specific instructions
+        // (Python, pathlib, etc.) that waste context for local model use cases.
+        ...(isOllamaProvider ? await loadOllamaInstructions() : await InstructionPrompt.system()),
       ]
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
@@ -683,6 +730,21 @@ export namespace SessionPrompt {
 
       // Compute coordinated injection budgets based on model context window
       const budget = InjectionBudget.compute(model.limit.context)
+      const isOllama = isOllamaProvider
+
+      // Re-inject cached RAG context on subsequent steps for ollama models.
+      // Local models need persistent access to domain data (CVEs, rules, etc.)
+      // across tool-call loops since they can't retrieve it themselves.
+      if (step > 1 && isOllamaProvider && cachedRagBlock) {
+        system.push(cachedRagBlock)
+      }
+
+      // Inject error-aware RAG context when the previous step had build errors.
+      // Only for ollama models — cloud models can reason about errors without docs.
+      if (isOllamaProvider && cachedErrorRagBlock) {
+        system.push(cachedErrorRagBlock)
+        cachedErrorRagBlock = undefined // one-shot: clear after injection
+      }
 
       // Inject intelligent context from the relevance pipeline (Phase 2)
       // Only on the first step to avoid redundant work on tool-call loops
@@ -694,41 +756,84 @@ export namespace SessionPrompt {
             .map((p) => (p as { type: "text"; text: string }).text)
             .join("\n") ?? ""
 
-          // Analyze user message for corrections (Pillar 43)
-          if (userText.length > 0) {
-            try {
-              Correction.analyze(sessionID, userText)
-            } catch (err) {
-              log.warn("correction analysis failed, continuing without", { error: err })
-            }
-          }
-
-          // Classify the task and inject strategy guidance (Pillar 20)
-          if (userText.length > 0) {
-            try {
-              Strategy.select(sessionID, userText)
-              const strategyBlock = Strategy.getInjection(sessionID)
-              if (strategyBlock) {
-                system.push(strategyBlock)
+          // Skip heavy analysis for ollama — small models can't use it effectively
+          if (!isOllama) {
+            // Analyze user message for corrections (Pillar 43)
+            if (userText.length > 0) {
+              try {
+                Correction.analyze(sessionID, userText)
+              } catch (err) {
+                log.warn("correction analysis failed, continuing without", { error: err })
               }
-            } catch (err) {
-              log.warn("strategy classification failed, continuing without", { error: err })
+            }
+
+            // Classify the task and inject strategy guidance (Pillar 20)
+            if (userText.length > 0) {
+              try {
+                Strategy.select(sessionID, userText)
+                const strategyBlock = Strategy.getInjection(sessionID)
+                if (strategyBlock) {
+                  system.push(strategyBlock)
+                }
+              } catch (err) {
+                log.warn("strategy classification failed, continuing without", { error: err })
+              }
             }
           }
 
           if (userText.length > 0) {
-            const recentFiles = ContextPipeline.extractRecentFiles(
-              msgs.flatMap((m) => m.parts.map((p) => ({
-                type: p.type,
-                tool: p.type === "tool" ? (p as any).tool : undefined,
-                input: p.type === "tool" ? (p as any).input : undefined,
-              }))),
-            )
-            const ctx = await Context.forMessage(userText, sessionID, recentFiles, {
-              maxTokens: budget.contextTokens,
-            })
-            if (ctx.contextBlock) {
-              system.push(ctx.contextBlock)
+            if (isOllama) {
+              // Small ollama: skip graph context, only inject RAG with tight budget
+              try {
+                const ragResult = await Context.forMessage(userText, sessionID, [], {
+                  maxTokens: Math.min(budget.contextTokens, 3000),
+                  ragMaxTokens: 2500,
+                })
+                if (ragResult.ragContextBlock) {
+                  system.push(ragResult.ragContextBlock)
+                  cachedRagBlock = ragResult.ragContextBlock
+                }
+              } catch (err) {
+                log.warn("RAG context failed, continuing without", { error: err })
+              }
+            } else if (isOllamaProvider) {
+              // Large ollama (20B+): full context pipeline but capped RAG budget
+              // to keep total system prompt reasonable for local inference
+              const recentFiles = ContextPipeline.extractRecentFiles(
+                msgs.flatMap((m) => m.parts.map((p) => ({
+                  type: p.type,
+                  tool: p.type === "tool" ? (p as any).tool : undefined,
+                  input: p.type === "tool" ? (p as any).input : undefined,
+                }))),
+              )
+              const ctx = await Context.forMessage(userText, sessionID, recentFiles, {
+                maxTokens: Math.min(budget.contextTokens, 2000),
+                ragMaxTokens: 800,
+              })
+              if (ctx.contextBlock) {
+                system.push(ctx.contextBlock)
+              }
+              if (ctx.ragContextBlock) {
+                system.push(ctx.ragContextBlock)
+                cachedRagBlock = ctx.ragContextBlock
+              }
+            } else {
+              const recentFiles = ContextPipeline.extractRecentFiles(
+                msgs.flatMap((m) => m.parts.map((p) => ({
+                  type: p.type,
+                  tool: p.type === "tool" ? (p as any).tool : undefined,
+                  input: p.type === "tool" ? (p as any).input : undefined,
+                }))),
+              )
+              const ctx = await Context.forMessage(userText, sessionID, recentFiles, {
+                maxTokens: budget.contextTokens,
+              })
+              if (ctx.contextBlock) {
+                system.push(ctx.contextBlock)
+              }
+              if (ctx.ragContextBlock) {
+                system.push(ctx.ragContextBlock)
+              }
             }
           }
         } catch (err) {
@@ -736,103 +841,98 @@ export namespace SessionPrompt {
         }
       }
 
-      // Inject strategy guidance on subsequent steps (Pillar 20)
-      // Strategy was classified on step 1; re-inject the same block on later steps
-      if (step > 1) {
-        const strategyBlock = Strategy.getInjection(sessionID)
-        if (strategyBlock) {
-          system.push(strategyBlock)
-        }
-      }
-
-      // Inject dynamic working context on steps > 1 (Pillar 18)
-      // On step 1, the static context pipeline runs. On subsequent steps,
-      // inject the evolving working set based on tool results.
-      if (step > 1) {
-        try {
-          const dynamicBlock = DynamicContext.getInjection(
-            sessionID, msgs, Math.floor(budget.contextTokens * 0.4),
-          )
-          if (dynamicBlock) {
-            system.push(dynamicBlock)
+      // Skip all heavy injections for ollama — small models get overwhelmed
+      // by too much context and perform worse, not better.
+      if (!isOllama) {
+        // Inject strategy guidance on subsequent steps (Pillar 20)
+        if (step > 1) {
+          const strategyBlock = Strategy.getInjection(sessionID)
+          if (strategyBlock) {
+            system.push(strategyBlock)
           }
-        } catch (err) {
-          log.warn("dynamic context injection failed, continuing without", { error: err })
         }
-      }
 
-      // Inject persistent memories from previous sessions (Phase 6)
-      // Only on first step — memories don't change within a turn
-      if (step === 1) {
-        try {
-          const memoryBlock = Memory.format({
-            maxChars: budget.memoryChars,
-            maxEntries: budget.memoryMaxEntries,
-          })
-          if (memoryBlock) {
-            system.push(memoryBlock)
-          }
-        } catch (err) {
-          log.warn("memory injection failed, continuing without", { error: err })
-        }
-      }
-
-      // Inject accumulated scratchpad (think tool reasoning) into system prompt
-      // Runs on every step so the agent always has access to its internal notes
-      try {
-        const scratchpadBlock = Scratchpad.format(msgs, {
-          maxChars: budget.scratchpadChars,
-          maxThoughts: budget.scratchpadMaxThoughts,
-        })
-        if (scratchpadBlock) {
-          system.push(scratchpadBlock)
-        }
-      } catch (err) {
-        log.warn("scratchpad injection failed, continuing without", { error: err })
-      }
-
-      // Inject structured session state on every step
-      // State survives compaction (stored in tool inputs) and gives the agent
-      // perfect situational awareness of goals, plan, decisions, and working set
-      try {
-        const currentState = SessionState.extract(msgs)
-        if (currentState) {
-          system.push(SessionState.format(currentState))
-        }
-      } catch (err) {
-        log.warn("session state injection failed, continuing without", { error: err })
-      }
-
-      // Meta-cognitive monitor: detect problematic patterns and inject warnings (Pillar 21)
-      // Pure heuristics — no LLM calls, sub-millisecond overhead
-      if (step > 1) {
-        try {
-          const warnings = Monitor.check(sessionID, msgs)
-          if (warnings.length > 0) {
-            const monitorState = Monitor.getState(sessionID)
-            const monitorBlock = Monitor.format(
-              warnings,
-              monitorState.step,
-              monitorState.tokenEstimate,
+        // Inject dynamic working context on steps > 1 (Pillar 18)
+        if (step > 1) {
+          try {
+            const dynamicBlock = DynamicContext.getInjection(
+              sessionID, msgs, Math.floor(budget.contextTokens * 0.4),
             )
-            if (monitorBlock) {
-              system.push(monitorBlock)
+            if (dynamicBlock) {
+              system.push(dynamicBlock)
             }
+          } catch (err) {
+            log.warn("dynamic context injection failed, continuing without", { error: err })
+          }
+        }
+
+        // Inject persistent memories from previous sessions (Phase 6)
+        if (step === 1) {
+          try {
+            const memoryBlock = Memory.format({
+              maxChars: budget.memoryChars,
+              maxEntries: budget.memoryMaxEntries,
+            })
+            if (memoryBlock) {
+              system.push(memoryBlock)
+            }
+          } catch (err) {
+            log.warn("memory injection failed, continuing without", { error: err })
+          }
+        }
+
+        // Inject accumulated scratchpad (think tool reasoning)
+        try {
+          const scratchpadBlock = Scratchpad.format(msgs, {
+            maxChars: budget.scratchpadChars,
+            maxThoughts: budget.scratchpadMaxThoughts,
+          })
+          if (scratchpadBlock) {
+            system.push(scratchpadBlock)
           }
         } catch (err) {
-          log.warn("monitor injection failed, continuing without", { error: err })
+          log.warn("scratchpad injection failed, continuing without", { error: err })
         }
-      }
 
-      // Inject real-time corrections from user redirections (Pillar 43)
-      // Runs on every step so the agent always sees accumulated corrections
-      try {
-        const correctionBlock = Correction.format(sessionID)
-        if (correctionBlock) {
-          system.push(correctionBlock)
+        // Inject structured session state
+        try {
+          const currentState = SessionState.extract(msgs)
+          if (currentState) {
+            system.push(SessionState.format(currentState))
+          }
+        } catch (err) {
+          log.warn("session state injection failed, continuing without", { error: err })
         }
-      } catch (err) {
-        log.warn("correction injection failed, continuing without", { error: err })
+
+        // Meta-cognitive monitor (Pillar 21)
+        if (step > 1) {
+          try {
+            const warnings = Monitor.check(sessionID, msgs)
+            if (warnings.length > 0) {
+              const monitorState = Monitor.getState(sessionID)
+              const monitorBlock = Monitor.format(
+                warnings,
+                monitorState.step,
+                monitorState.tokenEstimate,
+              )
+              if (monitorBlock) {
+                system.push(monitorBlock)
+              }
+            }
+          } catch (err) {
+            log.warn("monitor injection failed, continuing without", { error: err })
+          }
+        }
+
+        // Inject real-time corrections (Pillar 43)
+        try {
+          const correctionBlock = Correction.format(sessionID)
+          if (correctionBlock) {
+            system.push(correctionBlock)
+          }
+        } catch (err) {
+          log.warn("correction injection failed, continuing without", { error: err })
+        }
       }
 
       const result = await processor.process({
@@ -855,7 +955,9 @@ export namespace SessionPrompt {
         ],
         tools,
         model,
-        toolChoice: format.type === "json_schema" ? "required" : undefined,
+        toolChoice: format.type === "json_schema" ? "required"
+          : (isOllamaProvider && step === 1 && Object.keys(tools).length > 0) ? "required"
+          : undefined,
       })
 
       // Post-step: record tool results for dynamic context and monitor
@@ -865,6 +967,20 @@ export namespace SessionPrompt {
         if (toolParts.length > 0) {
           DynamicContext.processToolResults(sessionID, toolParts)
           Monitor.recordStep(sessionID, toolParts)
+
+          // Error-aware RAG: search for docs when bash commands fail (ollama only)
+          if (isOllamaProvider) {
+            try {
+              await ErrorRAG.processToolResults(sessionID, toolParts)
+              const errorBlock = ErrorRAG.getInjection(sessionID)
+              if (errorBlock) {
+                cachedErrorRagBlock = errorBlock
+                ErrorRAG.clearInjection(sessionID)
+              }
+            } catch (err) {
+              log.warn("error RAG processing failed, continuing", { error: err })
+            }
+          }
         }
         // Update token estimates for the monitor
         if (processor.message.tokens) {
@@ -953,6 +1069,7 @@ export namespace SessionPrompt {
     DynamicContext.clear(sessionID)
     Monitor.clear(sessionID)
     Strategy.clear(sessionID)
+    ErrorRAG.clear(sessionID)
     SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
@@ -1030,7 +1147,12 @@ export namespace SessionPrompt {
         description: item.description,
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
-          const ctx = context(args, options)
+          // Ollama schemas use snake_case property names (see ProviderTransform.schema),
+          // but tool implementations expect camelCase (zod). Convert back.
+          const toolArgs = input.model.providerID === "ollama"
+            ? ProviderTransform.snakeToCamelKeys(args as Record<string, unknown>)
+            : args
+          const ctx = context(toolArgs, options)
           await Plugin.trigger(
             "tool.execute.before",
             {
@@ -1039,10 +1161,10 @@ export namespace SessionPrompt {
               callID: ctx.callID,
             },
             {
-              args,
+              args: toolArgs,
             },
           )
-          const result = await item.execute(args, ctx)
+          const result = await item.execute(toolArgs, ctx)
           const output = {
             ...result,
             attachments: result.attachments?.map((attachment) => ({
@@ -1595,7 +1717,7 @@ export namespace SessionPrompt {
     if (!userMessage) return input.messages
 
     // Original logic when experimental plan mode is disabled
-    if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
+    if (!Flag.CORTEX_EXPERIMENTAL_PLAN_MODE) {
       if (input.agent.name === "plan") {
         userMessage.parts.push({
           id: PartID.ascending(),
@@ -2050,6 +2172,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   export async function command(input: CommandInput) {
     log.info("command", input)
     const command = await Command.get(input.command)
+
+    // Intercept "help" — return help text directly without invoking the model
+    const trimmedArgs = input.arguments.trim().toLowerCase()
+    if (command.help && (trimmedArgs === "help" || trimmedArgs === "--help" || trimmedArgs === "-h")) {
+      return commandHelp(input, command)
+    }
+
+    // Direct execution — bypass the model entirely for commands with execute handlers
+    if (command.execute) {
+      const output = await command.execute(input.arguments)
+      return commandDirect(input, command, output)
+    }
+
     const agentName = command.agent ?? input.agent ?? (await Agent.defaultAgent())
 
     const raw = input.arguments.match(argsRegex) ?? []
@@ -2187,6 +2322,84 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     })
 
     return result
+  }
+
+  /**
+   * Handle /command help — returns help text directly without invoking the model.
+   */
+  async function commandHelp(input: CommandInput, command: Command.Info): Promise<MessageV2.WithParts> {
+    return commandDirect(input, command, command.help!)
+  }
+
+  /**
+   * Execute a command directly and return a synthetic assistant message.
+   * Bypasses the model entirely — creates user + assistant messages in history.
+   */
+  async function commandDirect(
+    input: CommandInput,
+    command: Command.Info,
+    output: string,
+  ): Promise<MessageV2.WithParts> {
+    const agentName = command.agent ?? input.agent ?? (await Agent.defaultAgent())
+    const model = input.model ? Provider.parseModel(input.model) : await lastModel(input.sessionID)
+
+    // Create user message so it appears in chat history
+    await createUserMessage({
+      sessionID: input.sessionID,
+      messageID: input.messageID,
+      agent: agentName,
+      model,
+      parts: [{ type: "text", text: `/${input.command} ${input.arguments}`.trim() }],
+    })
+    await Session.touch(input.sessionID)
+
+    // Create synthetic assistant message
+    const userMsgID = input.messageID ?? MessageID.ascending()
+    const assistantMessage = (await Session.updateMessage({
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: userMsgID,
+      sessionID: input.sessionID,
+      mode: agentName,
+      agent: agentName,
+      path: {
+        cwd: Instance.directory,
+        root: Instance.worktree,
+      },
+      cost: 0,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+      modelID: model.modelID,
+      providerID: model.providerID,
+      time: {
+        created: Date.now(),
+        completed: Date.now(),
+      },
+      finish: "stop",
+    })) as MessageV2.Assistant
+
+    await Session.updatePart({
+      id: PartID.ascending(),
+      messageID: assistantMessage.id,
+      sessionID: input.sessionID,
+      type: "text",
+      text: output,
+    })
+
+    const parts = await MessageV2.parts(assistantMessage.id)
+
+    Bus.publish(Command.Event.Executed, {
+      name: input.command,
+      sessionID: input.sessionID,
+      arguments: input.arguments,
+      messageID: assistantMessage.id,
+    })
+
+    return { info: assistantMessage, parts }
   }
 
   async function ensureTitle(input: {

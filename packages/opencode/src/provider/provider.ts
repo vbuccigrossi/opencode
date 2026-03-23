@@ -18,6 +18,7 @@ import { iife } from "@/util/iife"
 import { Global } from "../global"
 import path from "path"
 import { Filesystem } from "../util/filesystem"
+import { Ollama } from "./ollama"
 
 // Direct imports for bundled providers
 import { createAmazonBedrock, type AmazonBedrockProviderSettings } from "@ai-sdk/amazon-bedrock"
@@ -54,6 +55,167 @@ export namespace Provider {
     const match = /^gpt-(\d+)/.exec(modelID)
     if (!match) return false
     return Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini")
+  }
+
+  /**
+   * Detect and extract tool calls embedded as JSON in ollama's content field.
+   *
+   * Ollama's OpenAI-compatible endpoint sometimes returns tool calls as
+   * `{"name": "...", "arguments": {...}}` in the content string instead of
+   * using the proper `tool_calls` response field. This function parses
+   * the content and returns a properly formatted tool_calls array.
+   *
+   * @param content - The message content string from ollama
+   * @returns Formatted tool_calls array, or null if no tool call detected
+   */
+  function repairOllamaToolCalls(content: string): any[] | null {
+    if (!content) return null
+    const trimmed = content.trim()
+
+    // Try to parse as a single tool call: {"name": "...", "arguments": {...}}
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed && typeof parsed === "object" && parsed.name && parsed.arguments) {
+        return [
+          {
+            id: `call_${Date.now()}`,
+            type: "function",
+            function: {
+              name: parsed.name,
+              arguments: typeof parsed.arguments === "string" ? parsed.arguments : JSON.stringify(parsed.arguments),
+            },
+          },
+        ]
+      }
+    } catch {
+      // Not valid JSON — try regex extraction
+    }
+
+    // Try to extract JSON from markdown code blocks
+    const codeBlockMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/)
+    if (codeBlockMatch) {
+      try {
+        const parsed = JSON.parse(codeBlockMatch[1].trim())
+        if (parsed && typeof parsed === "object" && parsed.name && parsed.arguments) {
+          return [
+            {
+              id: `call_${Date.now()}`,
+              type: "function",
+              function: {
+                name: parsed.name,
+                arguments:
+                  typeof parsed.arguments === "string" ? parsed.arguments : JSON.stringify(parsed.arguments),
+              },
+            },
+          ]
+        }
+      } catch {
+        // Not a tool call in code block
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * Wrap an ollama SSE response to intercept and repair tool calls.
+   *
+   * Streams chunks through in real-time. If the model natively uses
+   * tool_calls in the delta, passes through unchanged. If the model
+   * puts tool-call JSON in the content field, detects this at the end
+   * and re-emits as proper tool_calls format.
+   *
+   * Uses a two-phase approach: stream through immediately but also
+   * accumulate content. If at the end the content looks like a tool call
+   * and no native tool_calls were seen, emit a repair chunk.
+   */
+  function wrapOllamaSSE(res: Response): Response {
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    let accumulatedContent = ""
+    let sawNativeToolCalls = false
+    let templateChunk: any = null
+
+    const stream = new ReadableStream({
+      async pull(controller) {
+        const encoder = new TextEncoder()
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) {
+            // Stream ended — check if we need to repair
+            if (!sawNativeToolCalls && accumulatedContent.trim()) {
+              const repaired = repairOllamaToolCalls(accumulatedContent)
+              if (repaired && templateChunk) {
+                // Emit repair: a tool_calls chunk followed by finish
+                const toolChunk = {
+                  ...templateChunk,
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      role: "assistant",
+                      tool_calls: repaired.map((tc: any, i: number) => ({
+                        index: i,
+                        id: tc.id,
+                        type: "function",
+                        function: { name: tc.function.name, arguments: tc.function.arguments },
+                      })),
+                    },
+                    finish_reason: null,
+                  }],
+                }
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(toolChunk)}\n\n`))
+                const finishChunk = {
+                  ...templateChunk,
+                  choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+                }
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(finishChunk)}\n\n`))
+                controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+              }
+            }
+            controller.close()
+            return
+          }
+
+          const text = decoder.decode(value, { stream: true })
+
+          // Track content and native tool_calls as they stream
+          for (const line of text.split("\n")) {
+            if (!line.startsWith("data: ")) continue
+            const data = line.slice(6).trim()
+            if (data === "[DONE]") continue
+            try {
+              const parsed = JSON.parse(data)
+              if (!templateChunk) templateChunk = parsed
+              const delta = parsed.choices?.[0]?.delta
+              if (delta?.content) accumulatedContent += delta.content
+              if (delta?.tool_calls) {
+                sawNativeToolCalls = true
+                // Log tool call arguments for debugging
+                for (const tc of delta.tool_calls) {
+                  if (tc.function?.arguments) {
+                    log.info("ollama tool_call delta", {
+                      name: tc.function.name,
+                      argsChunk: tc.function.arguments.slice(0, 200),
+                    })
+                  }
+                }
+              }
+            } catch {
+              // Ignore parse errors
+            }
+          }
+
+          // Always pass through the original chunk immediately
+          controller.enqueue(value)
+        }
+      },
+    })
+
+    return new Response(stream, {
+      status: res.status,
+      headers: res.headers,
+    })
   }
 
   function wrapSSE(res: Response, ms: number, ctl: AbortController) {
@@ -1026,6 +1188,64 @@ export namespace Provider {
       mergeProvider(providerID, partial)
     }
 
+    // Auto-detect ollama if running locally and not already configured
+    const ollamaID = ProviderID.make("ollama")
+    if (!disabled.has(ollamaID) && !providers[ollamaID]) {
+      try {
+        const ollamaConfig = await Ollama.buildProviderConfig()
+        if (ollamaConfig) {
+          const ollamaProvider: Info = {
+            id: ollamaID,
+            name: ollamaConfig.name,
+            source: "env",
+            env: [],
+            options: { baseURL: ollamaConfig.api },
+            models: {},
+          }
+          for (const [modelID, model] of Object.entries(ollamaConfig.models)) {
+            ollamaProvider.models[modelID] = {
+              id: ModelID.make(modelID),
+              providerID: ollamaID,
+              name: model.name,
+              api: {
+                id: model.id,
+                url: ollamaConfig.api,
+                npm: ollamaConfig.npm,
+              },
+              status: "active",
+              release_date: new Date().toISOString().split("T")[0],
+              headers: {},
+              options: { paramSize: (model as any).param_size ?? 0 },
+              cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+              capabilities: {
+                temperature: model.temperature,
+                reasoning: model.reasoning,
+                attachment: model.attachment,
+                toolcall: model.tool_call,
+                input: { text: true, audio: false, image: false, video: false, pdf: false },
+                output: { text: true, audio: false, image: false, video: false, pdf: false },
+                interleaved: false,
+              },
+              limit: {
+                // Scale context window by model size:
+                // - Small models (< 13B): 32K — can't effectively use more
+                // - Medium models (13-20B): 64K
+                // - Large models (20B+): 128K — devstral, etc.
+                context: ((model as any).param_size ?? 0) >= 20 ? 131072
+                  : ((model as any).param_size ?? 0) >= 13 ? 65536
+                  : 32768,
+                output: ((model as any).param_size ?? 0) >= 20 ? 16384 : 8192,
+              },
+            }
+          }
+          providers[ollamaID] = ollamaProvider
+          log.info("ollama auto-detected", { models: Object.keys(ollamaProvider.models).length })
+        }
+      } catch (err: any) {
+        log.info("ollama auto-detection skipped", { error: err.message })
+      }
+    }
+
     for (const [id, provider] of Object.entries(providers)) {
       const providerID = ProviderID.make(id)
       if (!isProviderAllowed(providerID)) {
@@ -1065,7 +1285,7 @@ export namespace Provider {
           (providerID === ProviderID.openrouter && modelID === "openai/gpt-5-chat")
         )
           delete provider.models[modelID]
-        if (model.status === "alpha" && !Flag.OPENCODE_ENABLE_EXPERIMENTAL_MODELS) delete provider.models[modelID]
+        if (model.status === "alpha" && !Flag.CORTEX_ENABLE_EXPERIMENTAL_MODELS) delete provider.models[modelID]
         if (model.status === "deprecated") delete provider.models[modelID]
         if (
           (configProvider?.blacklist && configProvider.blacklist.includes(modelID)) ||
@@ -1179,6 +1399,43 @@ export namespace Provider {
         const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
         if (combined) opts.signal = combined
 
+        // Inject num_ctx for ollama to ensure the context window matches the model's capability.
+        // Ollama defaults to 4096 tokens which truncates large system prompts.
+        if (model.providerID === "ollama" && opts.body && opts.method === "POST") {
+          try {
+            const debugBody = JSON.parse(opts.body as string)
+            // Set num_ctx based on model context limit (ollama uses "options" for runtime params)
+            if (!debugBody.options) debugBody.options = {}
+            if (!debugBody.options.num_ctx) {
+              // Use 8K context — balances speed vs capacity on CPU-only systems.
+              // Tools + system + RAG ≈ 4K tokens; leaves 4K for conversation.
+              debugBody.options.num_ctx = 8192
+            }
+            opts.body = JSON.stringify(debugBody)
+            log.info("ollama request", {
+              model: debugBody.model,
+              hasTools: !!debugBody.tools,
+              toolCount: debugBody.tools?.length ?? 0,
+              toolNames: debugBody.tools?.map((t: any) => t.function?.name),
+              toolChoice: debugBody.tool_choice,
+              stream: debugBody.stream,
+              numCtx: debugBody.options.num_ctx,
+              systemLen: debugBody.messages?.[0]?.role === "system" ? debugBody.messages[0].content?.length : 0,
+              messageCount: debugBody.messages?.length,
+              totalBodyLen: (opts.body as string).length,
+            })
+            // Log write tool schema for debugging tool call failures
+            if (debugBody.tools) {
+              const writeTool = debugBody.tools.find((t: any) => t.function?.name === "write")
+              if (writeTool) {
+                log.info("ollama write tool schema", {
+                  schema: JSON.stringify(writeTool).slice(0, 500),
+                })
+              }
+            }
+          } catch {}
+        }
+
         // Strip openai itemId metadata following what codex does
         // Codex uses #[serde(skip_serializing)] on id fields for all item types:
         // Message, Reasoning, FunctionCall, LocalShellCall, CustomToolCall, WebSearchCall
@@ -1202,6 +1459,19 @@ export namespace Provider {
           // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
           timeout: false,
         })
+
+        // Ollama sometimes returns tool calls as JSON in the content field
+        // instead of using the proper tool_calls response format.
+        // Intercept streaming responses, accumulate content, and if the
+        // final result is a tool call JSON, re-emit as proper tool_calls SSE.
+        if (
+          model.providerID === "ollama" &&
+          res.ok &&
+          res.headers.get("content-type")?.includes("text/event-stream") &&
+          res.body
+        ) {
+          return wrapOllamaSSE(res)
+        }
 
         if (!chunkAbortCtl) return res
         return wrapSSE(res, chunkTimeout, chunkAbortCtl)

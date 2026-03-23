@@ -57,6 +57,9 @@ import { ChangesetTool } from "./changeset"
 import { AlarmTool } from "./alarm"
 import { ModelSwitchTool } from "./model_switch"
 import { SemanticSearchTool } from "./semantic_search"
+import { ScheduleTool } from "./schedule"
+import { DeviceTool } from "./device"
+import { TokenTool } from "./token"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -134,7 +137,7 @@ export namespace ToolRegistry {
   async function all(): Promise<Tool.Info[]> {
     const custom = await state().then((x) => x.custom)
     const config = await Config.get()
-    const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
+    const question = ["app", "cli", "desktop"].includes(Flag.CORTEX_CLIENT) || Flag.CORTEX_ENABLE_QUESTION_TOOL
 
     return [
       InvalidTool,
@@ -180,9 +183,12 @@ export namespace ToolRegistry {
       AlarmTool,
       ModelSwitchTool,
       SemanticSearchTool,
-      ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
+      ScheduleTool,
+      DeviceTool,
+      TokenTool,
+      ...(Flag.CORTEX_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
-      ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
+      ...(Flag.CORTEX_EXPERIMENTAL_PLAN_MODE && Flag.CORTEX_CLIENT === "cli" ? [PlanExitTool] : []),
       ...(config.experimental?.mcp_lazy === true ? [McpSearchTool] : []),
       ...custom,
     ]
@@ -215,9 +221,19 @@ export namespace ToolRegistry {
     const result = await Promise.all(
       tools
         .filter((t) => {
+          // For ollama models, restrict to essential tools only.
+          // Local models have small context windows; too many tool schemas
+          // overflow the context and cause truncated/broken tool calls.
+          if (model.providerID === "ollama" as any) {
+            const essentialTools = new Set([
+              "read", "write", "edit", "bash", "think",
+            ])
+            return essentialTools.has(t.id)
+          }
+
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {
-            return model.providerID === ProviderID.opencode || Flag.OPENCODE_ENABLE_EXA
+            return model.providerID === ProviderID.opencode || Flag.CORTEX_ENABLE_EXA
           }
 
           // use apply tool in same format as codex
@@ -245,8 +261,35 @@ export namespace ToolRegistry {
         }),
     )
 
+    // For ollama, compact tool descriptions to save context window tokens.
+    // The full descriptions are designed for cloud models with 128K+ context.
+    if (model.providerID === "ollama" as any) {
+      for (const tool of result) {
+        tool.description = compactDescription(tool.id, tool.description)
+      }
+    }
+
     // Cache the result
     toolsCache.set(cacheKey, { result, timestamp: Date.now() })
     return result
+  }
+
+  /** Compact descriptions for ollama to save context tokens. */
+  const COMPACT_DESCRIPTIONS: Record<string, string> = {
+    bash: `Run a shell command. Use for git, npm, docker, build tools, etc.
+Do NOT use for file operations — use read/write/edit instead.
+Quote paths with spaces. Commands time out after 2 minutes by default.`,
+    read: `Read a file's contents. Returns file content with line numbers.
+Use offset/limit for large files to read specific sections.`,
+    write: `Create or overwrite a file. Provide the full file content.
+Read the file first if it already exists.`,
+    edit: `Replace text in an existing file. Provide old_string (exact match) and new_string.
+The old_string must be unique in the file. Use replace_all for global replacements.`,
+    think: `Use this tool to think through complex problems step by step.
+Write your reasoning in the thought parameter. No side effects.`,
+  }
+
+  function compactDescription(id: string, original: string): string {
+    return COMPACT_DESCRIPTIONS[id] ?? original
   }
 }

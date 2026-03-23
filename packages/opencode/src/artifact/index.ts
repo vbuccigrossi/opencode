@@ -370,7 +370,7 @@ export namespace Artifact {
       .replace(/^-|-$/g, "")
     const date = new Date(artifact.createdAt).toISOString().slice(0, 10)
     const ext = artifact.format === "json" ? "json" : artifact.format === "html" ? "html" : "md"
-    return path.join(Instance.directory, ".opencode", "reports", `${slug}-${date}.${ext}`)
+    return path.join(Instance.directory, ".cortex", "reports", `${slug}-${date}.${ext}`)
   }
 
   function escapeRegex(str: string): string {

@@ -308,7 +308,7 @@ export namespace Secrets {
     "venv",
     ".venv",
     "target",
-    ".opencode",
+    ".cortex",
     ".claude",
   ]
 

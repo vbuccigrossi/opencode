@@ -11,6 +11,7 @@ import PROMPT_GEMINI from "./prompt/gemini.txt"
 
 import PROMPT_CODEX from "./prompt/codex_header.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
+import PROMPT_OLLAMA from "./prompt/ollama.txt"
 import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { PermissionNext } from "@/permission"
@@ -28,6 +29,10 @@ export namespace SystemPrompt {
     if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
     if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
     if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
+    // All ollama models get the compact prompt optimized for tool discipline.
+    // Even large models (24B) benefit from concise instructions on CPU
+    // where every token in the prompt adds to time-to-first-token.
+    if (model.providerID === "ollama") return [PROMPT_OLLAMA]
     return [PROMPT_DEFAULT]
   }
 

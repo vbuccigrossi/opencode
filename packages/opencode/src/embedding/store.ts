@@ -6,11 +6,14 @@ import { Log } from "@/util/log"
  * Vector storage and retrieval backed by SQLite.
  *
  * Stores embeddings as serialized Float32Arrays in BLOB columns.
- * Cosine similarity is computed in TypeScript for portability.
- * This approach is efficient for codebase-scale datasets (100s to low 1000s of vectors).
+ * Uses sqlite-vec's native vec_distance_cosine() when available for fast
+ * similarity search, with fallback to TypeScript cosine similarity.
  */
 export namespace EmbeddingStore {
   const log = Log.create({ service: "embedding.store" })
+
+  /** Whether sqlite-vec extension is loaded (detected on first search). */
+  let _sqliteVecAvailable: boolean | undefined
 
   // -------------------------------------------------------------------------
   // Serialization
@@ -75,10 +78,31 @@ export namespace EmbeddingStore {
   }
 
   /**
+   * Check if sqlite-vec extension is loaded and available.
+   *
+   * @returns true if vec_distance_cosine() is usable
+   */
+  export function isSqliteVecAvailable(): boolean {
+    if (_sqliteVecAvailable !== undefined) return _sqliteVecAvailable
+    try {
+      Database.use((db) => {
+        ;(db as any).run(sql`SELECT vec_version()`)
+      })
+      _sqliteVecAvailable = true
+      log.info("sqlite-vec extension detected, using native vector search")
+    } catch {
+      _sqliteVecAvailable = false
+      log.info("sqlite-vec not available, using JS cosine similarity fallback")
+    }
+    return _sqliteVecAvailable
+  }
+
+  /**
    * Find the top-K most similar vectors to a query vector.
    *
-   * Performs brute-force cosine similarity against all stored vectors
-   * for a project. Fast enough for typical codebase sizes (<10k nodes).
+   * Uses sqlite-vec's native vec_distance_cosine() when available for
+   * hardware-accelerated distance computation. Falls back to TypeScript
+   * cosine similarity if sqlite-vec is not loaded.
    *
    * @param queryVec - Query embedding vector
    * @param projectID - Project to search within
@@ -91,6 +115,73 @@ export namespace EmbeddingStore {
     projectID: string,
     topK: number = 20,
     minSimilarity: number = 0.3,
+  ): Array<{ nodeID: string; similarity: number }> {
+    if (isSqliteVecAvailable()) {
+      return searchNative(queryVec, projectID, topK, minSimilarity)
+    }
+    return searchJS(queryVec, projectID, topK, minSimilarity)
+  }
+
+  /**
+   * Native sqlite-vec search using vec_distance_cosine() in SQL.
+   *
+   * Pushes distance computation into native C code for better performance,
+   * especially with large vector sets (10k+).
+   *
+   * @param queryVec - Query embedding vector
+   * @param projectID - Project to search within
+   * @param topK - Number of results
+   * @param minSimilarity - Minimum similarity threshold
+   * @returns Sorted results
+   */
+  function searchNative(
+    queryVec: Float32Array,
+    projectID: string,
+    topK: number,
+    minSimilarity: number,
+  ): Array<{ nodeID: string; similarity: number }> {
+    const queryBuf = serialize(queryVec)
+    // vec_distance_cosine returns distance (0 = identical), convert to similarity (1 - distance)
+    const maxDistance = 1 - minSimilarity
+
+    const rows = Database.use((db) =>
+      db
+        .select({
+          node_id: EmbeddingTable.node_id,
+          distance: sql<number>`vec_distance_cosine(${EmbeddingTable.vector}, ${queryBuf})`,
+        })
+        .from(EmbeddingTable)
+        .where(eq(EmbeddingTable.project_id, projectID))
+        .orderBy(sql`vec_distance_cosine(${EmbeddingTable.vector}, ${queryBuf}) ASC`)
+        .limit(topK)
+        .all(),
+    )
+
+    return rows
+      .filter((row) => row.distance <= maxDistance)
+      .map((row) => ({
+        nodeID: row.node_id,
+        similarity: 1 - row.distance,
+      }))
+  }
+
+  /**
+   * Fallback JavaScript search using cosine similarity.
+   *
+   * Loads all vectors for the project and computes similarity in TypeScript.
+   * Fast enough for typical codebase sizes (<10k vectors).
+   *
+   * @param queryVec - Query embedding vector
+   * @param projectID - Project to search within
+   * @param topK - Number of results
+   * @param minSimilarity - Minimum similarity threshold
+   * @returns Sorted results
+   */
+  function searchJS(
+    queryVec: Float32Array,
+    projectID: string,
+    topK: number,
+    minSimilarity: number,
   ): Array<{ nodeID: string; similarity: number }> {
     const rows = Database.use((db) =>
       db
@@ -326,6 +417,21 @@ export namespace EmbeddingStore {
       dimension: result?.dimension ?? null,
       model: result?.model ?? null,
     }
+  }
+
+  /**
+   * Remove a single embedding by node ID and project ID.
+   *
+   * @param projectID - Project ID
+   * @param nodeID - Node ID to remove
+   */
+  export function remove(projectID: string, nodeID: string): void {
+    Database.use((db) =>
+      db
+        .delete(EmbeddingTable)
+        .where(and(eq(EmbeddingTable.node_id, nodeID), eq(EmbeddingTable.project_id, projectID)))
+        .run(),
+    )
   }
 
   // -------------------------------------------------------------------------
