@@ -57,6 +57,7 @@ import { Monitor } from "../monitor"
 import { Strategy } from "../strategy"
 import { Correction } from "../correction"
 import { ErrorRAG } from "../embedding/error-rag"
+import { CodeRouter } from "./code-router"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncate"
@@ -1164,7 +1165,41 @@ export namespace SessionPrompt {
               args: toolArgs,
             },
           )
-          const result = await item.execute(toolArgs, ctx)
+          // Dual-model routing: if a coder model is configured and this is
+          // a code-writing tool, route through the coder for better code quality.
+          let finalArgs = toolArgs
+          if (CodeRouter.shouldRoute(item.id, input.model)) {
+            const coderModel = await CodeRouter.getCoderModel()
+            if (coderModel) {
+              // Build context from recent messages for the coder
+              const recentContext = input.messages.map((m) => {
+                const role = m.info.role
+                const textParts = m.parts
+                  .filter((p): p is MessageV2.TextPart => p.type === "text")
+                  .map((p) => p.text)
+                return { role, content: textParts.join("\n") || undefined }
+              })
+              const context = CodeRouter.buildContext(recentContext)
+
+              if (item.id === "edit" && finalArgs.filePath && finalArgs.newString) {
+                const routed = await CodeRouter.routeEdit(
+                  finalArgs as { filePath: string; oldString: string; newString: string; replaceAll?: boolean },
+                  context,
+                  coderModel,
+                )
+                finalArgs = routed
+              } else if (item.id === "write" && finalArgs.filePath && finalArgs.content) {
+                const routed = await CodeRouter.routeWrite(
+                  finalArgs as { filePath: string; content: string },
+                  context,
+                  coderModel,
+                )
+                finalArgs = routed
+              }
+            }
+          }
+
+          const result = await item.execute(finalArgs, ctx)
           const output = {
             ...result,
             attachments: result.attachments?.map((attachment) => ({

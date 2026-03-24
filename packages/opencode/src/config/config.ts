@@ -1293,6 +1293,14 @@ export namespace Config {
             .record(z.string(), z.string())
             .optional()
             .describe("Map of alias → canonical tool name for repairing miscalled tools"),
+          coder_model: z
+            .string()
+            .optional()
+            .describe(
+              "Dedicated coding model for dual-model routing (e.g. 'ollama/qwen2.5-coder:32b-instruct-q4_K_M'). " +
+                "When set, the session's planner model handles reasoning and tool selection, while the coder model " +
+                "generates actual code for edit/write operations. Format: 'provider/model'.",
+            ),
         })
         .optional(),
     })
