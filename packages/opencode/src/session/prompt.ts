@@ -57,6 +57,7 @@ import { Monitor } from "../monitor"
 import { Strategy } from "../strategy"
 import { Correction } from "../correction"
 import { ErrorRAG } from "../embedding/error-rag"
+import { StepRAG } from "../embedding/step-rag"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncate"
@@ -348,6 +349,13 @@ export namespace SessionPrompt {
     // and the model loses all context about CVEs, rules, etc.
     let cachedRagBlock: string | undefined
     let cachedErrorRagBlock: string | undefined
+    // Track repeated tool calls to detect doom loops
+    let lastToolSig = ""
+    let repeatCount = 0
+    // Track if last step was a write — force test before edit
+    let lastStepWasWrite = false
+    // Track if code has been tested successfully — allow model to stop
+    let codeTestedSuccessfully = false
     const session = await Session.get(sessionID)
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
@@ -616,7 +624,7 @@ export namespace SessionPrompt {
 
       // normal processing
       const agent = await Agent.get(lastUser.agent)
-      const maxSteps = agent.steps ?? Infinity
+      const maxSteps = agent.steps ?? (model.providerID === "ollama" ? 50 : Infinity)
       const isLastStep = step >= maxSteps
       msgs = await insertReminders({
         messages: msgs,
@@ -714,6 +722,7 @@ export namespace SessionPrompt {
       // for MCP servers, skills, and verbose system prompts.
       const skills = isOllamaProvider ? undefined : await SystemPrompt.skills(agent)
       const system = [
+        ...SystemPrompt.provider(model),
         ...(await SystemPrompt.environment(model)),
         ...(skills ? [skills] : []),
         // Skip MCP servers for all ollama — they add tool schemas that overflow context
@@ -730,7 +739,8 @@ export namespace SessionPrompt {
 
       // Compute coordinated injection budgets based on model context window
       const budget = InjectionBudget.compute(model.limit.context)
-      const isOllama = isOllamaProvider
+      const paramSize = model.options?.paramSize ?? 0
+      const isOllama = isOllamaProvider && paramSize < 20
 
       // Re-inject cached RAG context on subsequent steps for ollama models.
       // Local models need persistent access to domain data (CVEs, rules, etc.)
@@ -744,6 +754,16 @@ export namespace SessionPrompt {
       if (isOllamaProvider && cachedErrorRagBlock) {
         system.push(cachedErrorRagBlock)
         cachedErrorRagBlock = undefined // one-shot: clear after injection
+      }
+
+      // Inject step-aware RAG context — dynamic docs based on what tools were called.
+      // Refreshes each step with new context from think/read/write/edit tool calls.
+      if (isOllamaProvider && step > 1) {
+        const stepBlock = StepRAG.getInjection(sessionID)
+        if (stepBlock) {
+          system.push(stepBlock)
+          StepRAG.clearInjection(sessionID)
+        }
       }
 
       // Inject intelligent context from the relevance pipeline (Phase 2)
@@ -807,8 +827,8 @@ export namespace SessionPrompt {
                 }))),
               )
               const ctx = await Context.forMessage(userText, sessionID, recentFiles, {
-                maxTokens: Math.min(budget.contextTokens, 2000),
-                ragMaxTokens: 800,
+                maxTokens: Math.min(budget.contextTokens, 6000),
+                ragMaxTokens: 4000,
               })
               if (ctx.contextBlock) {
                 system.push(ctx.contextBlock)
@@ -956,7 +976,7 @@ export namespace SessionPrompt {
         tools,
         model,
         toolChoice: format.type === "json_schema" ? "required"
-          : (isOllamaProvider && step === 1 && Object.keys(tools).length > 0) ? "required"
+          : (isOllamaProvider && step <= 5 && !isLastStep && repeatCount < 2 && !codeTestedSuccessfully && Object.keys(tools).length > 0) ? "required"
           : undefined,
       })
 
@@ -965,6 +985,40 @@ export namespace SessionPrompt {
         const stepParts = await MessageV2.parts(processor.message.id)
         const toolParts = stepParts.filter((p): p is MessageV2.ToolPart => p.type === "tool")
         if (toolParts.length > 0) {
+          // Track if last step included a write — next step should test, not edit
+          const toolNames = toolParts.map(p => p.tool)
+          lastStepWasWrite = toolNames.includes("write")
+          // Reset after a bash call (test was run)
+          if (toolNames.includes("bash")) {
+            lastStepWasWrite = false
+            // Check if bash succeeded — if so, code is tested and model can stop
+            const bashParts = toolParts.filter(p => p.tool === "bash")
+            const allBashSucceeded = bashParts.every(p => (p.state as any)?.status === "completed")
+            if (allBashSucceeded && bashParts.length > 0) {
+              codeTestedSuccessfully = true
+              log.info("code tested successfully, allowing model to finish", { sessionID, step })
+            }
+          }
+          // Reset if an edit happens after successful test (model is modifying again)
+          if (toolNames.includes("edit") || toolNames.includes("write")) {
+            codeTestedSuccessfully = false
+          }
+
+          // Detect doom loops — same tool with same args repeated
+          const sig = toolParts.map(p => {
+            const input = (p.state as any)?.input ?? {}
+            return `${p.tool}:${JSON.stringify(input)}`.slice(0, 200)
+          }).join("|")
+          if (sig === lastToolSig) {
+            repeatCount++
+            if (repeatCount >= 2) {
+              log.info("doom loop detected, dropping toolChoice", { sessionID, sig: sig.slice(0, 100), repeatCount })
+            }
+          } else {
+            lastToolSig = sig
+            repeatCount = 0
+          }
+
           DynamicContext.processToolResults(sessionID, toolParts)
           Monitor.recordStep(sessionID, toolParts)
 
@@ -979,6 +1033,14 @@ export namespace SessionPrompt {
               }
             } catch (err) {
               log.warn("error RAG processing failed, continuing", { error: err })
+            }
+
+            // Step-aware RAG: search for docs based on what tools were called
+            // (think, read, write, edit, grep, bash) to provide dynamic context
+            try {
+              await StepRAG.processToolResults(sessionID, toolParts)
+            } catch (err) {
+              log.warn("step RAG processing failed, continuing", { error: err })
             }
           }
         }

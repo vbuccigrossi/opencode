@@ -68,51 +68,112 @@ export namespace Provider {
    * @param content - The message content string from ollama
    * @returns Formatted tool_calls array, or null if no tool call detected
    */
+  /** Try to parse a single JSON tool call object, with fixup for common issues. */
+  function tryParseToolCall(jsonStr: string): any | null {
+    const s = jsonStr.trim()
+    if (!s.startsWith("{")) return null
+
+    // Try direct parse first
+    try {
+      const parsed = JSON.parse(s)
+      if (parsed?.name && parsed?.arguments) return parsed
+    } catch {
+      // Fall through to fixup
+    }
+
+    // Fixup pass: common JSON issues from LLMs
+    let fixed = s
+    // Remove trailing commas before } or ]
+    fixed = fixed.replace(/,\s*([}\]])/g, "$1")
+    // Fix unquoted keys (name: -> "name":)
+    fixed = fixed.replace(/([{,]\s*)([a-zA-Z_]\w*)\s*:/g, '$1"$2":')
+    // Fix single quotes to double quotes (but not inside strings)
+    fixed = fixed.replace(/'/g, '"')
+    // Remove trailing text after the last }
+    const lastBrace = fixed.lastIndexOf("}")
+    if (lastBrace > 0) fixed = fixed.slice(0, lastBrace + 1)
+    // Ensure balanced braces — add missing closing braces
+    const opens = (fixed.match(/{/g) || []).length
+    const closes = (fixed.match(/}/g) || []).length
+    if (opens > closes) fixed += "}".repeat(opens - closes)
+
+    try {
+      const parsed = JSON.parse(fixed)
+      if (parsed?.name && parsed?.arguments) {
+        log.info("ollama json fixup applied", { original: s.slice(0, 100), fixed: fixed.slice(0, 100) })
+        return parsed
+      }
+    } catch {
+      // Still broken — give up on this one
+    }
+    return null
+  }
+
   function repairOllamaToolCalls(content: string): any[] | null {
     if (!content) return null
     const trimmed = content.trim()
+    log.info("ollama repair attempt", { contentLen: trimmed.length, preview: trimmed.slice(0, 200) })
 
-    // Try to parse as a single tool call: {"name": "...", "arguments": {...}}
-    try {
-      const parsed = JSON.parse(trimmed)
-      if (parsed && typeof parsed === "object" && parsed.name && parsed.arguments) {
-        return [
-          {
-            id: `call_${Date.now()}`,
-            type: "function",
-            function: {
-              name: parsed.name,
-              arguments: typeof parsed.arguments === "string" ? parsed.arguments : JSON.stringify(parsed.arguments),
-            },
+    // Strip <think>...</think> blocks and <tool_call> tags
+    let cleaned = trimmed
+      .replace(/<think>[\s\S]*?<\/think>/g, "")
+      .replace(/<\/?tool_call>/g, "")
+      .trim()
+
+    // Strip leading text before first { (model sometimes says "I'll do X" before the JSON)
+    const firstBrace = cleaned.indexOf("{")
+    if (firstBrace > 0) {
+      cleaned = cleaned.slice(firstBrace)
+    }
+    if (firstBrace < 0) return null // No JSON at all
+
+    // Strip markdown code block wrappers
+    cleaned = cleaned.replace(/```(?:json)?\s*\n?/g, "").replace(/\n?```/g, "").trim()
+
+    // Split on boundaries between JSON objects:
+    // Look for }...{ with whitespace/newlines between them
+    const jsonObjects = cleaned.split(/\}\s*\n+\s*\{/).map((part, i, arr) => {
+      if (arr.length === 1) return part
+      if (i === 0) return part + "}"
+      if (i === arr.length - 1) return "{" + part
+      return "{" + part + "}"
+    })
+
+    const results: any[] = []
+    for (const jsonStr of jsonObjects) {
+      const parsed = tryParseToolCall(jsonStr)
+      if (parsed) {
+        results.push({
+          id: `call_${Date.now()}_${results.length}`,
+          type: "function",
+          function: {
+            name: parsed.name,
+            arguments: typeof parsed.arguments === "string" ? parsed.arguments : JSON.stringify(parsed.arguments),
           },
-        ]
+        })
       }
-    } catch {
-      // Not valid JSON — try regex extraction
     }
+    if (results.length > 0) return results
 
-    // Try to extract JSON from markdown code blocks
-    const codeBlockMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/)
-    if (codeBlockMatch) {
+    // Last resort: regex extract all {"name": "...", "arguments": ...} patterns
+    const regex = /\{"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{[\s\S]*?\})\s*\}/g
+    let match
+    while ((match = regex.exec(trimmed)) !== null) {
       try {
-        const parsed = JSON.parse(codeBlockMatch[1].trim())
-        if (parsed && typeof parsed === "object" && parsed.name && parsed.arguments) {
-          return [
-            {
-              id: `call_${Date.now()}`,
-              type: "function",
-              function: {
-                name: parsed.name,
-                arguments:
-                  typeof parsed.arguments === "string" ? parsed.arguments : JSON.stringify(parsed.arguments),
-              },
-            },
-          ]
-        }
+        const args = JSON.parse(match[2])
+        results.push({
+          id: `call_${Date.now()}_${results.length}`,
+          type: "function",
+          function: {
+            name: match[1],
+            arguments: JSON.stringify(args),
+          },
+        })
       } catch {
-        // Not a tool call in code block
+        // Can't parse arguments — skip
       }
     }
+    if (results.length > 0) return results
 
     return null
   }
@@ -132,9 +193,13 @@ export namespace Provider {
   function wrapOllamaSSE(res: Response): Response {
     const reader = res.body!.getReader()
     const decoder = new TextDecoder()
+
+    // Stream-through approach: pass chunks immediately but track content
+    // for repair at the end. Reasoning fields are stripped in real-time.
     let accumulatedContent = ""
-    let sawNativeToolCalls = false
     let templateChunk: any = null
+    let sawNativeToolCalls = false
+    let lineBuf = "" // Buffer for partial SSE lines across TCP chunks
 
     const stream = new ReadableStream({
       async pull(controller) {
@@ -143,11 +208,14 @@ export namespace Provider {
         while (true) {
           const { done, value } = await reader.read()
           if (done) {
-            // Stream ended — check if we need to repair
-            if (!sawNativeToolCalls && accumulatedContent.trim()) {
+            // Stream ended — if no native tool calls, try to repair content
+            if (!sawNativeToolCalls && accumulatedContent.trim() && templateChunk) {
               const repaired = repairOllamaToolCalls(accumulatedContent)
-              if (repaired && templateChunk) {
-                // Emit repair: a tool_calls chunk followed by finish
+              if (repaired) {
+                log.info("ollama tool call repair", {
+                  toolCount: repaired.length,
+                  names: repaired.map((tc: any) => tc.function.name),
+                })
                 const toolChunk = {
                   ...templateChunk,
                   choices: [{
@@ -171,6 +239,8 @@ export namespace Provider {
                 }
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(finishChunk)}\n\n`))
                 controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+                controller.close()
+                return
               }
             }
             controller.close()
@@ -178,36 +248,48 @@ export namespace Provider {
           }
 
           const text = decoder.decode(value, { stream: true })
+          lineBuf += text
 
-          // Track content and native tool_calls as they stream
-          for (const line of text.split("\n")) {
-            if (!line.startsWith("data: ")) continue
+          // Process complete SSE lines, keep partial line in buffer
+          const lines = lineBuf.split("\n")
+          lineBuf = lines.pop() ?? "" // Last element may be incomplete
+
+          let outputText = ""
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) {
+              outputText += line + "\n"
+              continue
+            }
             const data = line.slice(6).trim()
-            if (data === "[DONE]") continue
+            if (data === "[DONE]") {
+              outputText += line + "\n"
+              continue
+            }
             try {
               const parsed = JSON.parse(data)
               if (!templateChunk) templateChunk = parsed
               const delta = parsed.choices?.[0]?.delta
               if (delta?.content) accumulatedContent += delta.content
-              if (delta?.tool_calls) {
+              if (delta?.tool_calls && Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
                 sawNativeToolCalls = true
-                // Log tool call arguments for debugging
-                for (const tc of delta.tool_calls) {
-                  if (tc.function?.arguments) {
-                    log.info("ollama tool_call delta", {
-                      name: tc.function.name,
-                      argsChunk: tc.function.arguments.slice(0, 200),
-                    })
-                  }
-                }
+              }
+
+              // Strip reasoning field — pass through everything else
+              if (delta?.reasoning) {
+                delete delta.reasoning
+                outputText += `data: ${JSON.stringify(parsed)}\n`
+              } else {
+                outputText += line + "\n"
               }
             } catch {
-              // Ignore parse errors
+              // Partial JSON — pass through as-is
+              outputText += line + "\n"
             }
           }
 
-          // Always pass through the original chunk immediately
-          controller.enqueue(value)
+          if (outputText) {
+            controller.enqueue(encoder.encode(outputText))
+          }
         }
       },
     })
@@ -1234,7 +1316,7 @@ export namespace Provider {
                 context: ((model as any).param_size ?? 0) >= 20 ? 131072
                   : ((model as any).param_size ?? 0) >= 13 ? 65536
                   : 32768,
-                output: ((model as any).param_size ?? 0) >= 20 ? 16384 : 8192,
+                output: ((model as any).param_size ?? 0) >= 20 ? 32768 : 8192,
               },
             }
           }
@@ -1407,9 +1489,13 @@ export namespace Provider {
             // Set num_ctx based on model context limit (ollama uses "options" for runtime params)
             if (!debugBody.options) debugBody.options = {}
             if (!debugBody.options.num_ctx) {
-              // Use 8K context — balances speed vs capacity on CPU-only systems.
-              // Tools + system + RAG ≈ 4K tokens; leaves 4K for conversation.
-              debugBody.options.num_ctx = 8192
+              debugBody.options.num_ctx = 65536
+            }
+            // Qwen3 has built-in thinking that consumes output tokens.
+            // We can't disable it via the OpenAI-compatible endpoint, so
+            // set num_predict high enough for thinking + actual tool calls.
+            if (!debugBody.options.num_predict) {
+              debugBody.options.num_predict = 16384
             }
             opts.body = JSON.stringify(debugBody)
             log.info("ollama request", {
@@ -1464,12 +1550,24 @@ export namespace Provider {
         // instead of using the proper tool_calls response format.
         // Intercept streaming responses, accumulate content, and if the
         // final result is a tool call JSON, re-emit as proper tool_calls SSE.
+        const isOllama = model.providerID === "ollama"
+        const contentType = res.headers.get("content-type") ?? ""
+        if (isOllama) {
+          log.info("ollama fetch intercept", {
+            ok: res.ok,
+            contentType,
+            hasBody: !!res.body,
+            status: res.status,
+            url: typeof input === "string" ? input : input?.url,
+          })
+        }
         if (
-          model.providerID === "ollama" &&
+          isOllama &&
           res.ok &&
-          res.headers.get("content-type")?.includes("text/event-stream") &&
+          contentType.includes("text/event-stream") &&
           res.body
         ) {
+          log.info("ollama wrapping SSE for tool call repair")
           return wrapOllamaSSE(res)
         }
 

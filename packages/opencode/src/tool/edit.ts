@@ -59,7 +59,15 @@ export const EditTool = Tool.define("edit", {
     }
 
     if (params.oldString === params.newString) {
-      throw new Error("No changes to apply: oldString and newString are identical.")
+      return {
+        title: path.relative(Instance.worktree, params.filePath),
+        metadata: {
+          diagnostics: {},
+          diff: "",
+          filediff: { file: params.filePath, additions: 0, deletions: 0 },
+        },
+        output: "No changes needed — the old and new text are identical. The file is already correct. Move on to the next step.",
+      }
     }
 
     const filePath = path.isAbsolute(params.filePath) ? params.filePath : path.join(Instance.directory, params.filePath)
@@ -675,7 +683,7 @@ export function trimDiff(diff: string): string {
 
 export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
   if (oldString === newString) {
-    throw new Error("No changes to apply: oldString and newString are identical.")
+    return content // No changes needed — already identical
   }
 
   let notFound = true
@@ -705,9 +713,71 @@ export function replace(content: string, oldString: string, newString: string, r
   }
 
   if (notFound) {
+    // Try fuzzy best-match: find the block in the file most similar to oldString
+    const bestMatch = findClosestMatch(content, oldString)
+    if (bestMatch) {
+      throw new Error(
+        `Could not find oldString in the file. Did you mean this similar block?\n` +
+        `--- Your oldString (first 3 lines) ---\n${oldString.split("\n").slice(0, 3).join("\n")}\n` +
+        `--- Closest match in file (lines ${bestMatch.startLine}-${bestMatch.endLine}) ---\n${bestMatch.text.split("\n").slice(0, 3).join("\n")}\n` +
+        `TIP: Use the read tool to see the current file content, then copy the exact text you want to replace.`
+      )
+    }
     throw new Error(
-      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      "Could not find oldString in the file. The text you provided does not exist in the file. " +
+      "Use the read tool to see the current file content, then use the exact text from the file as oldString."
     )
   }
   throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
+}
+
+/**
+ * Find the block of lines in `content` most similar to `search`.
+ * Uses line-level similarity scoring to find the best fuzzy match.
+ */
+function findClosestMatch(content: string, search: string): { text: string; startLine: number; endLine: number } | null {
+  const contentLines = content.split("\n")
+  const searchLines = search.split("\n").map(l => l.trim().toLowerCase())
+  const searchLen = searchLines.length
+
+  if (searchLen === 0 || contentLines.length === 0) return null
+
+  let bestScore = 0
+  let bestStart = -1
+
+  // Slide a window of searchLen lines across the content
+  for (let i = 0; i <= contentLines.length - searchLen; i++) {
+    let matchingLines = 0
+    for (let j = 0; j < searchLen; j++) {
+      const contentLine = contentLines[i + j].trim().toLowerCase()
+      const searchLine = searchLines[j]
+      // Count lines that are similar (contain same key tokens)
+      if (contentLine === searchLine) {
+        matchingLines += 2 // exact match worth double
+      } else if (contentLine.length > 0 && searchLine.length > 0) {
+        // Check for partial match — share significant tokens
+        const contentTokens = new Set(contentLine.split(/\s+/).filter(t => t.length > 2))
+        const searchTokens = searchLine.split(/\s+/).filter(t => t.length > 2)
+        const shared = searchTokens.filter(t => contentTokens.has(t)).length
+        if (searchTokens.length > 0 && shared / searchTokens.length > 0.5) {
+          matchingLines += 1
+        }
+      }
+    }
+
+    const score = matchingLines / (searchLen * 2) // normalize to 0-1
+    if (score > bestScore) {
+      bestScore = score
+      bestStart = i
+    }
+  }
+
+  // Only return if at least 30% similar
+  if (bestScore < 0.3 || bestStart < 0) return null
+
+  return {
+    text: contentLines.slice(bestStart, bestStart + searchLen).join("\n"),
+    startLine: bestStart + 1,
+    endLine: bestStart + searchLen,
+  }
 }

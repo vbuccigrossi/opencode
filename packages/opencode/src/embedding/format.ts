@@ -200,17 +200,35 @@ export namespace RAGFormatter {
     ".snort", ".suricata", ".conf", ".cfg",
   ])
 
+  /** Extensions for code files that should be shown in full when small enough. */
+  const CODE_FILE_EXTS = new Set([
+    ".go", ".py", ".rs", ".c", ".cpp", ".h", ".js", ".ts",
+    ".java", ".rb", ".sh", ".bash", ".lua",
+  ])
+
   /** Max file size (chars) to include in full. */
-  const SMALL_FILE_MAX = 4000
+  const SMALL_FILE_MAX = 8000
 
   /**
-   * Check if a file is small enough to include its full content.
+   * Check if a file should be included in full rather than as a chunk.
+   * Detection rules and configs are always included in full.
+   * Code files are included in full if they're under the size threshold,
+   * since partial code (missing imports, struct definitions) is useless.
    */
   function isSmallFile(filePath: string): boolean {
     const ext = extractExtension(filePath)
     if (SMALL_FILE_EXTS.has(ext)) return true
-    // Also treat any .rule-like file as small
     if (filePath.includes(".snort.") || filePath.includes(".suricata.")) return true
+    // Code files: check actual size — include full content if small enough
+    // Partial code without imports/struct definitions is worse than useless
+    if (CODE_FILE_EXTS.has(ext)) {
+      try {
+        const stat = require("fs").statSync(filePath)
+        return stat.size <= SMALL_FILE_MAX
+      } catch {
+        return false
+      }
+    }
     return false
   }
 

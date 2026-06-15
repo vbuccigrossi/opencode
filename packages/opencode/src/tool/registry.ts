@@ -221,12 +221,13 @@ export namespace ToolRegistry {
     const result = await Promise.all(
       tools
         .filter((t) => {
-          // For ollama models, restrict to essential tools only.
-          // Local models have small context windows; too many tool schemas
-          // overflow the context and cause truncated/broken tool calls.
+          // For ollama models, restrict to a curated tool set.
+          // 32K context can handle ~15 tools comfortably.
           if (model.providerID === "ollama" as any) {
             const essentialTools = new Set([
               "read", "write", "edit", "bash", "think",
+              "glob", "grep",
+              "semantic_search", "diff",
             ])
             return essentialTools.has(t.id)
           }
@@ -286,7 +287,16 @@ Read the file first if it already exists.`,
     edit: `Replace text in an existing file. Provide old_string (exact match) and new_string.
 The old_string must be unique in the file. Use replace_all for global replacements.`,
     think: `Use this tool to think through complex problems step by step.
-Write your reasoning in the thought parameter. No side effects.`,
+Write your reasoning in the thought parameter. No side effects.
+Always think FIRST before writing code on complex tasks.`,
+    grep: `Search file contents by regex pattern. Returns matching file paths or content lines.
+Use output_mode "content" to see matching lines with context.`,
+    glob: `Find files by name/path pattern (e.g., "**/*.go", "src/**/*.ts").
+Returns matching file paths sorted by modification time.`,
+    semantic_search: `Search indexed documentation, code examples, and reference material.
+Operations: search (natural language query), rag_status (check index), status (check provider).
+Use this to find API docs, exploit templates, detection rule syntax, and CVE details.`,
+    diff: `Show changes made to files. Use to review your edits before moving on.`,
   }
 
   function compactDescription(id: string, original: string): string {
